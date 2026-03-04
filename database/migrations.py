@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS group_settings (
 CREATE TABLE IF NOT EXISTS tracked_tokens (
   mint TEXT PRIMARY KEY,
   post_mode TEXT NOT NULL, -- 'channel' or 'none'
+  telegram_link TEXT,
+  emoji TEXT,
   created_at INTEGER NOT NULL
 );
 """,
@@ -23,6 +25,7 @@ CREATE TABLE IF NOT EXISTS ads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_by INTEGER NOT NULL,
   text TEXT NOT NULL,
+  url TEXT,
   start_ts INTEGER NOT NULL,
   end_ts INTEGER NOT NULL,
   tx_sig TEXT NOT NULL UNIQUE,
