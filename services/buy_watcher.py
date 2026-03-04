@@ -9,7 +9,7 @@ from services.helius_listener import HeliusClient, _find_buy_in_tx
 from services.token_meta import fetch_token_meta
 from services.ads_service import AdsService
 from utils.price import sol_usd
-from utils.formatter import build_buy_message
+from utils.formatter import build_buy_message_group, build_buy_message_channel
 from bot.keyboards import buy_kb
 
 TX_URL = "https://solscan.io/tx/{sig}"
@@ -101,22 +101,69 @@ class BuyWatcher:
         got_tokens = float(ev.get("got_tokens") or 0.0)
         buyer = ev.get("buyer") or "Unknown"
         spent_usd = spent_sol * sol_price if sol_price and spent_sol else 0.0
-        msg_text = build_buy_message(
-            token_name=token_name,
+        now_ts = int(time.time())
+        try:
+            conn2 = await self.db.connect()
+            if spent_usd and spent_usd > 0:
+                await conn2.execute("INSERT INTO buys(mint, usd, ts) VALUES(?,?,?)", (mint, float(spent_usd), now_ts))
+            if meta.get("priceUsd") is not None:
+                await conn2.execute("INSERT INTO price_snapshots(mint, price_usd, ts) VALUES(?,?,?)", (mint, float(meta.get("priceUsd")), now_ts))
+            await conn2.commit()
+            await conn2.close()
+        except Exception:
+            pass
+
+        tx_url = TX_URL.format(sig=ev["signature"])
+        dexs_url = meta.get("dexUrl")
+        tg_url = None
+        # pick a default Telegram link for this token from any active group config
+        try:
+            for _r in tgt.get("groups", []):
+                if _r.get("telegram_link"):
+                    tg_url = _r.get("telegram_link")
+                    break
+        except Exception:
+            tg_url = None
+        trending_url = None
+        # trending channel link (clickable)
+        if settings.POST_CHANNEL:
+            ch = settings.POST_CHANNEL.lstrip("@")
+            trending_url = f"https://t.me/{ch}"
+
+        # group message uses group settings emoji and tg link (if set)
+        msg_text = build_buy_message_group(
+            token_symbol=token_name,
             emoji="🟢",
             spent_sol=spent_sol,
             spent_usd=spent_usd,
             got_tokens=got_tokens,
             buyer=buyer,
-            tx_url=TX_URL.format(sig=ev["signature"]),
+            tx_url=tx_url,
             price_usd=meta.get("priceUsd"),
             liquidity_usd=meta.get("liquidityUsd"),
             mcap_usd=meta.get("mcapUsd"),
-            gt_url=meta.get("gtUrl"),
-            dexs_url=meta.get("dexUrl"),
-            tg_url=None,
+            dexs_url=dexs_url,
+            tg_url=tg_url,
+            trending_url=trending_url,
             ad_text=ad_text,
         )
+
+        msg_text_channel = build_buy_message_channel(
+            token_symbol=token_name,
+            emoji="✅",
+            spent_sol=spent_sol,
+            spent_usd=spent_usd,
+            got_tokens=got_tokens,
+            buyer=buyer,
+            tx_url=tx_url,
+            price_usd=meta.get("priceUsd"),
+            mcap_usd=meta.get("mcapUsd"),
+            dexs_url=dexs_url,
+            tg_url=tg_url,
+            trending_url=trending_url,
+            ad_text=ad_text,
+        )
+
 
         # send to groups (respect group settings: min_buy + emoji + tg link + media)
         for r in tgt["groups"]:
@@ -127,22 +174,23 @@ class BuyWatcher:
             tg = r["telegram_link"] or None
             media = r["media_file_id"]
             # rebuild message with group preferences
-            msg_text2 = build_buy_message(
-                token_name=token_name,
+            msg_text2 = build_buy_message_group(
+                token_symbol=token_name,
                 emoji=emoji,
                 spent_sol=spent_sol,
                 spent_usd=spent_usd,
                 got_tokens=got_tokens,
                 buyer=buyer,
-                tx_url=TX_URL.format(sig=ev["signature"]),
+                tx_url=tx_url,
                 price_usd=meta.get("priceUsd"),
                 liquidity_usd=meta.get("liquidityUsd"),
                 mcap_usd=meta.get("mcapUsd"),
-                gt_url=meta.get("gtUrl"),
-                dexs_url=meta.get("dexUrl"),
+                dexs_url=dexs_url,
                 tg_url=tg,
+                trending_url=trending_url,
                 ad_text=ad_text,
             )
+
             try:
                 if media:
                     await self.bot.send_photo(r["group_id"], media, caption=msg_text2, reply_markup=buy_kb(token_name, mint))
@@ -151,10 +199,17 @@ class BuyWatcher:
             except Exception:
                 pass
 
-        # send to channel if owner added token
+                # also post group buys to the main channel (trending channel) if configured
+        if settings.POST_CHANNEL:
+            try:
+                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint))
+            except Exception:
+                pass
+
+# send to channel if owner added token
         if tgt.get("post_channel"):
             try:
-                await self.bot.send_message(settings.POST_CHANNEL, msg_text, reply_markup=buy_kb(token_name, mint))
+                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint))
             except Exception:
                 pass
 
