@@ -58,10 +58,9 @@ def build_buy_message_group(
     lines.append("")
     # Footer links in one row
     footer = " | ".join([
-        _a("TX", tx_url),
-        _a("DexS", dexs_url),
-        _a("Telegram", tg_url),
-        _a("Trending", trending_url),
+        _a("💎 Listing", listing_url),
+        _a("🐸 Buy", buy_url),
+        _a("📊 Chart", dexs_url),
     ])
     lines.append(footer)
     lines.append("")
@@ -83,11 +82,12 @@ def build_buy_message_channel(
     mcap_usd: Optional[float],
     dexs_url: Optional[str],
     tg_url: Optional[str],
-    listing_url: Optional[str],
-    buy_url: Optional[str],
+    trending_url: Optional[str],
     ad_text: Optional[str],
     ad_url: Optional[str],
     book_ads_url: Optional[str],
+    listing_url: Optional[str],
+    buy_url: Optional[str],
 ) -> str:
     # Channel style (like your 2nd screenshot) but WITHOUT holders
     title = f"| {_a(token_symbol, tg_url)} Buy!"
