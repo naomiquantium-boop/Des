@@ -8,6 +8,7 @@ import re
 
 from bot.keyboards import configure_kb, wizard_nav_kb, confirm_kb
 from services.token_meta import fetch_token_meta
+from database.db import DB
 
 router = Router()
 
@@ -112,12 +113,10 @@ async def cfg_media(msg: Message, state: FSMContext):
     await state.set_state(Cfg.confirm)
 
 @router.callback_query(F.data == "cfg:activate")
-async def cfg_activate(cq: CallbackQuery, state: FSMContext):
+async def cfg_activate(cq: CallbackQuery, state: FSMContext, db: DB):
     data = await state.get_data()
     if not cq.message:
         return await cq.answer()
-    # save to DB via bot context
-    db = cq.bot.get("db")
     conn = await db.connect()
     now = int(time.time())
     await conn.execute(

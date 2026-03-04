@@ -10,6 +10,8 @@ from bot.config import settings
 from bot.keyboards import ads_duration_kb, ads_paid_kb
 from services.payment_verifier import verify_sol_transfer
 from services.ads_service import AdsService
+from database.db import DB
+from utils.solana_rpc import SolanaRPC
 
 router = Router()
 
@@ -76,19 +78,17 @@ async def ads_text(msg: Message, state: FSMContext):
     await state.set_state(AdsFlow.tx)
 
 @router.message(AdsFlow.tx)
-async def ads_tx(msg: Message, state: FSMContext):
+async def ads_tx(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
     sig = (msg.text or "").strip()
     if len(sig) < 20:
         return await msg.reply("Send a valid Solana tx signature.")
     data = await state.get_data()
-    rpc = msg.bot.get("rpc")
     res = await verify_sol_transfer(rpc, sig, settings.PAYMENT_WALLET, float(data["price"]))
     if not res.ok:
         return await msg.reply(f"❌ {res.reason}")
     now = int(time.time())
     start_ts = now
     end_ts = now + int(data["seconds"])
-    db = msg.bot.get("db")
     conn = await db.connect()
     ads_svc = AdsService(conn)
     try:
@@ -105,13 +105,12 @@ def _is_owner(msg: Message) -> bool:
     return msg.from_user and msg.from_user.id == settings.OWNER_ID
 
 @router.message(Command("addtoken"))
-async def addtoken(msg: Message, command: CommandObject):
+async def addtoken(msg: Message, command: CommandObject, db: DB):
     if not _is_owner(msg):
         return
     if not command.args:
         return await msg.reply("Usage: /addtoken <MINT>")
     mint = command.args.strip()
-    db = msg.bot.get("db")
     conn = await db.connect()
     await conn.execute(
         "INSERT INTO tracked_tokens(mint, post_mode, created_at) VALUES(?, 'channel', ?) ON CONFLICT(mint) DO UPDATE SET post_mode='channel'",
@@ -122,13 +121,12 @@ async def addtoken(msg: Message, command: CommandObject):
     await msg.reply(f"✅ Tracking enabled for {mint} (posting to channel).")
 
 @router.message(Command("removetoken"))
-async def removetoken(msg: Message, command: CommandObject):
+async def removetoken(msg: Message, command: CommandObject, db: DB):
     if not _is_owner(msg):
         return
     if not command.args:
         return await msg.reply("Usage: /removetoken <MINT>")
     mint = command.args.strip()
-    db = msg.bot.get("db")
     conn = await db.connect()
     await conn.execute("DELETE FROM tracked_tokens WHERE mint=?", (mint,))
     await conn.commit()
@@ -136,12 +134,11 @@ async def removetoken(msg: Message, command: CommandObject):
     await msg.reply(f"✅ Removed {mint}.")
 
 @router.message(Command("setad"))
-async def setad(msg: Message, command: CommandObject):
+async def setad(msg: Message, command: CommandObject, db: DB):
     if not _is_owner(msg):
         return
     if not command.args:
         return await msg.reply("Usage: /setad <text>")
-    db = msg.bot.get("db")
     conn = await db.connect()
     ads_svc = AdsService(conn)
     await ads_svc.set_owner_fallback(command.args.strip())
@@ -149,10 +146,9 @@ async def setad(msg: Message, command: CommandObject):
     await msg.reply("✅ Owner fallback ad set.")
 
 @router.message(Command("status"))
-async def status(msg: Message):
+async def status(msg: Message, db: DB):
     if not _is_owner(msg):
         return
-    db = msg.bot.get("db")
     conn = await db.connect()
     cur = await conn.execute("SELECT COUNT(*) AS c FROM group_settings WHERE is_active=1")
     groups = (await cur.fetchone())["c"]

@@ -31,9 +31,9 @@ async def run():
 
     rpc = SolanaRPC(settings.SOLANA_RPC)
 
-    # attach shared objects
-    bot["db"] = db
-    bot["rpc"] = rpc
+    # Attach shared objects to dispatcher workflow_data for Aiogram v3 DI.
+    # Handlers can receive these as function parameters: (db: DB, rpc: SolanaRPC)
+    dp.workflow_data.update({"db": db, "rpc": rpc})
 
     dp.include_router(handlers_router)
     dp.include_router(wizard_router)
