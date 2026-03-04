@@ -32,13 +32,17 @@ class BuyWatcher:
             m.setdefault(mint, {"groups": [], "post_channel": False})
             m[mint]["groups"].append(r)
 
-        cur = await conn.execute("SELECT mint, post_mode FROM tracked_tokens")
+        cur = await conn.execute("SELECT mint, post_mode, telegram_link, emoji FROM tracked_tokens")
         rows2 = await cur.fetchall()
         for r in rows2:
             mint = r["mint"]
-            m.setdefault(mint, {"groups": [], "post_channel": False})
+            m.setdefault(mint, {"groups": [], "post_channel": False, "token_tg": None, "token_emoji": None})
             if r["post_mode"] == "channel":
                 m[mint]["post_channel"] = True
+            if r["telegram_link"]:
+                m[mint]["token_tg"] = r["telegram_link"]
+            if r["emoji"]:
+                m[mint]["token_emoji"] = r["emoji"]
         return m
 
     async def _get_last_sig(self, conn: aiosqlite.Connection, mint: str) -> str | None:
@@ -67,7 +71,9 @@ class BuyWatcher:
         conn = await self.db.connect()
         targets = await self._load_targets(conn)
         ads_svc = AdsService(conn)
-        ad_text = await ads_svc.get_active_ad_text() or await ads_svc.get_owner_fallback()
+        active = await ads_svc.get_active_ad()
+        fallback = await ads_svc.get_owner_fallback()
+        ad_text, ad_url = (active if active else fallback) if (active or fallback) else (None, None)
         sol_price = await sol_usd(settings.JUPITER_PRICE_URL)
 
         for mint, tgt in targets.items():
@@ -115,15 +121,16 @@ class BuyWatcher:
 
         tx_url = TX_URL.format(sig=ev["signature"])
         dexs_url = meta.get("dexUrl")
-        tg_url = None
-        # pick a default Telegram link for this token from any active group config
-        try:
-            for _r in tgt.get("groups", []):
-                if _r.get("telegram_link"):
-                    tg_url = _r.get("telegram_link")
-                    break
-        except Exception:
-            tg_url = None
+        # prefer owner-added token Telegram link, else fallback to group config
+        tg_url = tgt.get("token_tg")
+        if not tg_url:
+            try:
+                for _r in tgt.get("groups", []):
+                    if _r.get("telegram_link"):
+                        tg_url = _r.get("telegram_link")
+                        break
+            except Exception:
+                tg_url = None
         trending_url = None
         # trending channel link (clickable)
         if settings.POST_CHANNEL:
@@ -144,13 +151,16 @@ class BuyWatcher:
             mcap_usd=meta.get("mcapUsd"),
             dexs_url=dexs_url,
             tg_url=tg_url,
-            trending_url=trending_url,
+            listing_url=settings.LISTING_URL,
+            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
             ad_text=ad_text,
+            ad_url=ad_url,
+            book_ads_url=settings.BOOK_ADS_URL,
         )
 
         msg_text_channel = build_buy_message_channel(
             token_symbol=token_name,
-            emoji="✅",
+            emoji=tgt.get("token_emoji") or "✅",
             spent_sol=spent_sol,
             spent_usd=spent_usd,
             got_tokens=got_tokens,
@@ -160,8 +170,11 @@ class BuyWatcher:
             mcap_usd=meta.get("mcapUsd"),
             dexs_url=dexs_url,
             tg_url=tg_url,
-            trending_url=trending_url,
+            listing_url=settings.LISTING_URL,
+            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
             ad_text=ad_text,
+            ad_url=ad_url,
+            book_ads_url=settings.BOOK_ADS_URL,
         )
 
 
@@ -187,29 +200,28 @@ class BuyWatcher:
                 mcap_usd=meta.get("mcapUsd"),
                 dexs_url=dexs_url,
                 tg_url=tg,
-                trending_url=trending_url,
+                listing_url=settings.LISTING_URL,
+            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
                 ad_text=ad_text,
+                ad_url=ad_url,
+                book_ads_url=settings.BOOK_ADS_URL,
             )
 
             try:
                 if media:
                     await self.bot.send_photo(r["group_id"], media, caption=msg_text2, reply_markup=buy_kb(token_name, mint))
                 else:
-                    await self.bot.send_message(r["group_id"], msg_text2, reply_markup=buy_kb(token_name, mint))
+                    await self.bot.send_message(r["group_id"], msg_text2, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
             except Exception:
                 pass
 
-                # also post group buys to the main channel (trending channel) if configured
-        if settings.POST_CHANNEL:
+        # Post to channel once if configured AND (token is tracked for channel OR it had group activity)
+        if settings.POST_CHANNEL and (tgt.get("post_channel") or tgt.get("groups")):
+            channel_min = settings.MIN_BUY_DEFAULT_SOL
+            if spent_sol and spent_sol < channel_min:
+                return
             try:
-                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint))
-            except Exception:
-                pass
-
-# send to channel if owner added token
-        if tgt.get("post_channel"):
-            try:
-                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint))
+                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
             except Exception:
                 pass
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio, time
 import aiosqlite
 from typing import List, Tuple
+from aiogram.exceptions import TelegramBadRequest
 
 from bot.config import settings
 from services.token_meta import fetch_token_meta
@@ -68,7 +69,7 @@ class LeaderboardUpdater:
 
         mid = await self._get_kv(conn, "leaderboard_message_id")
         if not mid:
-            msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb())
+            msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
             await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
         else:
             try:
@@ -77,10 +78,18 @@ class LeaderboardUpdater:
                     chat_id=settings.POST_CHANNEL,
                     message_id=int(mid),
                     reply_markup=leaderboard_kb(),
+                    disable_web_page_preview=True,
                 )
+            except TelegramBadRequest as e:
+                # Avoid spamming: ignore "message is not modified"
+                if "message is not modified" in str(e).lower():
+                    return
+                # If message was deleted, resend
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
             except Exception:
                 # if edit fails (deleted), resend
-                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb())
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
 
         await conn.close()
