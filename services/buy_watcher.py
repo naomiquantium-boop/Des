@@ -121,6 +121,7 @@ class BuyWatcher:
 
         tx_url = TX_URL.format(sig=ev["signature"])
         dexs_url = meta.get("dexUrl")
+        buy_url = settings.BUY_LINK_TEMPLATE.format(mint=mint)
         # prefer owner-added token Telegram link, else fallback to group config
         tg_url = tgt.get("token_tg")
         if not tg_url:
@@ -151,11 +152,12 @@ class BuyWatcher:
             mcap_usd=meta.get("mcapUsd"),
             dexs_url=dexs_url,
             tg_url=tg_url,
-            listing_url=settings.LISTING_URL,
-            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
+            trending_url=trending_url,
             ad_text=ad_text,
             ad_url=ad_url,
             book_ads_url=settings.BOOK_ADS_URL,
+            listing_url=settings.LISTING_URL,
+            buy_url=buy_url,
         )
 
         msg_text_channel = build_buy_message_channel(
@@ -170,8 +172,7 @@ class BuyWatcher:
             mcap_usd=meta.get("mcapUsd"),
             dexs_url=dexs_url,
             tg_url=tg_url,
-            listing_url=settings.LISTING_URL,
-            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
+            trending_url=trending_url,
             ad_text=ad_text,
             ad_url=ad_url,
             book_ads_url=settings.BOOK_ADS_URL,
@@ -200,8 +201,7 @@ class BuyWatcher:
                 mcap_usd=meta.get("mcapUsd"),
                 dexs_url=dexs_url,
                 tg_url=tg,
-                listing_url=settings.LISTING_URL,
-            buy_url=f"https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}",
+                trending_url=trending_url,
                 ad_text=ad_text,
                 ad_url=ad_url,
                 book_ads_url=settings.BOOK_ADS_URL,
@@ -215,10 +215,18 @@ class BuyWatcher:
             except Exception:
                 pass
 
-        # Post to channel once if configured AND (token is tracked for channel OR it had group activity)
+                # Post to channel once if configured AND (token is tracked for channel OR it had group activity)
         if settings.POST_CHANNEL and (tgt.get("post_channel") or tgt.get("groups")):
-            channel_min = settings.MIN_BUY_DEFAULT_SOL
-            if spent_sol and spent_sol < channel_min:
+            # apply min buy to reduce spam (default 0.07 SOL) but don't block when spent cannot be parsed (spent_sol==0)
+            effective_min = settings.MIN_BUY_DEFAULT_SOL
+            try:
+                if tgt.get("groups"):
+                    mins = [float(r["min_buy_sol"]) for r in tgt["groups"] if r.get("min_buy_sol") is not None]
+                    if mins:
+                        effective_min = min(mins)
+            except Exception:
+                pass
+            if spent_sol > 0 and spent_sol < effective_min:
                 return
             try:
                 await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
