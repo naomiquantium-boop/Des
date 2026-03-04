@@ -109,16 +109,29 @@ async def addtoken(msg: Message, command: CommandObject, db: DB):
     if not _is_owner(msg):
         return
     if not command.args:
-        return await msg.reply("Usage: /addtoken <MINT>")
-    mint = command.args.strip()
+        return await msg.reply("Usage: /addtoken <MINT> | <TELEGRAM_LINK> | <EMOJI(optional)>")
+
+    # allow: /addtoken MINT | https://t.me/project | ✅
+    parts = [p.strip() for p in command.args.split("|")]
+    mint = parts[0]
+    tg_link = parts[1] if len(parts) > 1 and parts[1] else None
+    emoji = parts[2] if len(parts) > 2 and parts[2] else None
+
     conn = await db.connect()
     await conn.execute(
-        "INSERT INTO tracked_tokens(mint, post_mode, created_at) VALUES(?, 'channel', ?) ON CONFLICT(mint) DO UPDATE SET post_mode='channel'",
-        (mint, int(time.time())),
+        """
+        INSERT INTO tracked_tokens(mint, post_mode, telegram_link, emoji, created_at)
+        VALUES(?, 'channel', ?, ?, ?)
+        ON CONFLICT(mint) DO UPDATE SET
+          post_mode='channel',
+          telegram_link=COALESCE(excluded.telegram_link, tracked_tokens.telegram_link),
+          emoji=COALESCE(excluded.emoji, tracked_tokens.emoji)
+        """,
+        (mint, tg_link, emoji, int(time.time())),
     )
     await conn.commit()
     await conn.close()
-    await msg.reply(f"✅ Tracking enabled for {mint} (posting to channel).")
+    await msg.reply(f"✅ Tracking enabled for {mint} (posting to channel).\nTG: {tg_link or 'not set'}\nEmoji: {emoji or 'default'}")
 
 @router.message(Command("removetoken"))
 async def removetoken(msg: Message, command: CommandObject, db: DB):
@@ -141,9 +154,46 @@ async def setad(msg: Message, command: CommandObject, db: DB):
         return await msg.reply("Usage: /setad <text>")
     conn = await db.connect()
     ads_svc = AdsService(conn)
-    await ads_svc.set_owner_fallback(command.args.strip())
+    # Legacy: permanent fallback (24h)
+    end_ts = int(time.time()) + 24 * 3600
+    await ads_svc.set_owner_fallback_timed(command.args.strip(), None, end_ts)
     await conn.close()
     await msg.reply("✅ Owner fallback ad set.")
+
+@router.message(Command("adset"))
+async def adset(msg: Message, command: CommandObject, db: DB):
+    """Owner sets a timed global ad shown under all buys.
+
+    Format:
+      /adset 1h | Join SpyTON Community | https://t.me/SpyTonCommunity
+    """
+    if not _is_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage: /adset <duration> | <text> | <url(optional)>")
+    parts = [p.strip() for p in command.args.split("|")]
+    if len(parts) < 2:
+        return await msg.reply("Usage: /adset <duration> | <text> | <url(optional)>")
+    dur = parts[0].lower()
+    text = parts[1]
+    url = parts[2] if len(parts) > 2 and parts[2] else None
+
+    mult = 3600
+    if dur.endswith("h"):
+        seconds = int(float(dur[:-1]) * 3600)
+    elif dur.endswith("m"):
+        seconds = int(float(dur[:-1]) * 60)
+    elif dur.endswith("d"):
+        seconds = int(float(dur[:-1]) * 86400)
+    else:
+        return await msg.reply("Duration must end with h/m/d. Example: 1h")
+
+    end_ts = int(time.time()) + max(60, seconds)
+    conn = await db.connect()
+    ads_svc = AdsService(conn)
+    await ads_svc.set_owner_fallback_timed(text, url, end_ts)
+    await conn.close()
+    await msg.reply(f"✅ Global ad set for {dur}." + (f"\nLink: {url}" if url else ""))
 
 @router.message(Command("status"))
 async def status(msg: Message, db: DB):
