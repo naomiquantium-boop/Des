@@ -12,6 +12,7 @@ from utils.solana_rpc import SolanaRPC
 from bot.wizard import router as wizard_router
 from bot.handlers import router as handlers_router
 from services.buy_watcher import BuyWatcher
+from services.leaderboard import LeaderboardUpdater
 
 async def _migrate(db: DB):
     conn = await db.connect()
@@ -39,12 +40,16 @@ async def run():
     dp.include_router(wizard_router)
 
     watcher = BuyWatcher(bot=bot, db=db, rpc=rpc)
+    lb = LeaderboardUpdater(bot=bot, db=db)
     task = asyncio.create_task(watcher.run_forever())
+    task_lb = asyncio.create_task(lb.run_forever())
 
     try:
         await dp.start_polling(bot)
     finally:
         task.cancel()
+        task_lb.cancel()
+        await lb.close()
         await watcher.close()
         await rpc.close()
         await bot.session.close()

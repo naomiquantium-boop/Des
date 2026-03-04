@@ -1,6 +1,7 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup
 from urllib.parse import quote
+from bot.config import settings
 
 BUY_TEMPLATE = "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}"
 
@@ -43,4 +44,11 @@ def ads_paid_kb() -> InlineKeyboardMarkup:
     kb.button(text="✅ I Paid (send tx)", callback_data="ads:paid")
     kb.button(text="✖️ Cancel", callback_data="ads:cancel")
     kb.adjust(1)
+    return kb.as_markup()
+
+
+def leaderboard_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    # button style from your screenshot
+    kb.button(text="PumpTools Listing", url=settings.LISTING_URL)
     return kb.as_markup()
