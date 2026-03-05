@@ -1,4 +1,5 @@
 from __future__ import annotations
+from bot.config import settings
 from typing import Optional
 
 def short_addr(a: str, left: int = 4, right: int = 4) -> str:
@@ -39,8 +40,6 @@ def build_buy_message_group(
     tg_url: Optional[str],
     trending_url: Optional[str],
     ad_text: Optional[str],
-    ad_url: Optional[str],
-    book_ads_url: Optional[str],
 ) -> str:
     # Token name clickable to Telegram link
     title = f'{_a(token_symbol, tg_url)} Buy!'
@@ -58,16 +57,14 @@ def build_buy_message_group(
     lines.append("")
     # Footer links in one row
     footer = " | ".join([
-        _a("💎 Listing", listing_url),
-        _a("🐸 Buy", buy_url),
-        _a("📊 Chart", dexs_url),
+        _a("TX", tx_url),
+        _a("DexS", dexs_url),
+        _a("Telegram", tg_url),
+        _a("Trending", trending_url),
     ])
     lines.append(footer)
     lines.append("")
-    if ad_text:
-        lines.append(f"ad: {_a(ad_text, ad_url)}")
-    else:
-        lines.append(f"ad: {_a('Advertise here', book_ads_url)}")
+    lines.append(f"ad: {ad_text or 'Advertise here'}")
     return "\n".join(lines)
 
 def build_buy_message_channel(
@@ -84,10 +81,6 @@ def build_buy_message_channel(
     tg_url: Optional[str],
     trending_url: Optional[str],
     ad_text: Optional[str],
-    ad_url: Optional[str],
-    book_ads_url: Optional[str],
-    listing_url: Optional[str],
-    buy_url: Optional[str],
 ) -> str:
     # Channel style (like your 2nd screenshot) but WITHOUT holders
     title = f"| {_a(token_symbol, tg_url)} Buy!"
@@ -107,15 +100,13 @@ def build_buy_message_channel(
         lines.append(f"💵 MarketCap: ${fmt_num(mcap_usd, 0)}")
     lines.append("")
     footer = " | ".join([
-        _a("💎 Listing", listing_url),
-        _a("🐸 Buy", buy_url),
-        _a("📊 Chart", dexs_url),
+        _a("TX", tx_url),
+        _a("DexS", dexs_url),
+        _a("Telegram", tg_url),
+        _a("Trending", trending_url),
     ])
     lines.append(footer)
-    if ad_text:
-        lines.append(f"ad: {_a(ad_text, ad_url)}")
-    else:
-        lines.append(f"ad: {_a('Advertise here', book_ads_url)}")
+    lines.append(f"ad: {ad_text or 'Advertise here'}")
     return "\n".join(lines)
 
 def build_leaderboard_message(header_handle: str, rows: list[tuple[int,str,float]]) -> str:
@@ -129,3 +120,10 @@ def build_leaderboard_message(header_handle: str, rows: list[tuple[int,str,float
         sign = "+" if pct >= 0 else ""
         lines.append(f"{rank} — ${sym} | {sign}{pct:.0f}%")
     return "\n".join(lines)
+
+
+
+def _ad_line(ad_text: str | None) -> str:
+    if ad_text and ad_text.strip():
+        return f"ad: {ad_text}"
+    return f"ad: <a href=\"{settings.BOOK_ADS_URL}\">Advertise here</a>"
