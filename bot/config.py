@@ -12,6 +12,7 @@ class Settings(BaseModel):
     OWNER_ID: int = int(_get("OWNER_ID"))
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
+    BUY_LINK_TEMPLATE: str = _get("BUY_LINK_TEMPLATE", "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}")
     # Where users should be sent to buy/activate ads (used to hyperlink "Advertise here")
     # Default: bot deep-link that opens the Ads flow.
     BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/PumpToolsBuyBot?start=ads")
