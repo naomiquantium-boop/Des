@@ -64,7 +64,7 @@ def build_buy_message_group(
     ])
     lines.append(footer)
     lines.append("")
-    lines.append(f"ad: {ad_text or 'Advertise here'}")
+    lines.append(_ad_line(ad_text))
     return "\n".join(lines)
 
 def build_buy_message_channel(
@@ -106,7 +106,7 @@ def build_buy_message_channel(
         _a("Trending", trending_url),
     ])
     lines.append(footer)
-    lines.append(f"ad: {ad_text or 'Advertise here'}")
+    lines.append(_ad_line(ad_text))
     return "\n".join(lines)
 
 def build_leaderboard_message(header_handle: str, rows: list[tuple[int,str,float]]) -> str:
