@@ -115,9 +115,16 @@ async def addtoken(msg: Message, command: CommandObject, db: DB):
     mint = parts[0]
     tg_link = parts[1] if len(parts) > 1 and parts[1] else None
     conn = await db.connect()
+    # Save token for channel posting; store optional telegram link so token title/footer is clickable
     await conn.execute(
-        "INSERT INTO tracked_tokens(mint, post_mode, created_at) VALUES(?, 'channel', ?) ON CONFLICT(mint) DO UPDATE SET post_mode='channel'",
-        (mint, int(time.time())),
+        """
+        INSERT INTO tracked_tokens(mint, post_mode, created_at, telegram_link)
+        VALUES(?, 'channel', ?, ?)
+        ON CONFLICT(mint) DO UPDATE SET
+          post_mode='channel',
+          telegram_link=COALESCE(excluded.telegram_link, tracked_tokens.telegram_link)
+        """,
+        (mint, int(time.time()), tg_link),
     )
     await conn.commit()
     await conn.close()
@@ -131,7 +138,6 @@ async def removetoken(msg: Message, command: CommandObject, db: DB):
         return await msg.reply("Usage: /removetoken <MINT>")
     parts = [p.strip() for p in command.args.split("|")]
     mint = parts[0]
-    tg_link = parts[1] if len(parts) > 1 and parts[1] else None
     conn = await db.connect()
     await conn.execute("DELETE FROM tracked_tokens WHERE mint=?", (mint,))
     await conn.commit()
