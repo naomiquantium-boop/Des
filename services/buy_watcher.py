@@ -21,6 +21,20 @@ class BuyWatcher:
         self.rpc = rpc
         self.helius = HeliusClient(settings.HELIUS_API_KEY) if settings.HELIUS_API_KEY else None
         self._running = False
+        # cache chat types so we don't call get_chat repeatedly
+        self._chat_type_cache: Dict[int, str] = {}
+
+    async def _chat_type(self, chat_id: int) -> str:
+        """Return Telegram chat type (group/supergroup/channel/private)."""
+        if chat_id in self._chat_type_cache:
+            return self._chat_type_cache[chat_id]
+        try:
+            chat = await self.bot.get_chat(chat_id)
+            ctype = getattr(chat, "type", "") or ""
+        except Exception:
+            ctype = ""
+        self._chat_type_cache[chat_id] = ctype
+        return ctype
 
     async def _load_targets(self, conn: aiosqlite.Connection) -> dict:
         # returns mint -> {groups:[(group_id, settings)], post_channel:bool}
@@ -189,6 +203,39 @@ class BuyWatcher:
             emoji = r["emoji"]
             tg = r["telegram_link"] or None
             media = r["media_file_id"]
+            chat_id = int(r["group_id"])
+            ctype = await self._chat_type(chat_id)
+
+            # If this chat is a channel, NEVER attach media.
+            # Channel buys must be text-only.
+            if ctype == "channel":
+                msg_text2 = build_buy_message_channel(
+                    token_symbol=token_name,
+                    emoji="✅",
+                    spent_sol=spent_sol,
+                    spent_usd=spent_usd,
+                    got_tokens=got_tokens,
+                    buyer=buyer,
+                    tx_url=tx_url,
+                    price_usd=meta.get("priceUsd"),
+                    mcap_usd=meta.get("mcapUsd"),
+                    dexs_url=dexs_url,
+                    tg_url=tg,
+                    trending_url=trending_url,
+                    ad_text=ad_text,
+                )
+                try:
+                    await self.bot.send_message(
+                        chat_id,
+                        msg_text2,
+                        reply_markup=buy_kb(token_name, mint),
+                        disable_web_page_preview=True,
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
+                continue
+
             # rebuild message with group preferences
             msg_text2 = build_buy_message_group(
                 token_symbol=token_name,
@@ -209,9 +256,21 @@ class BuyWatcher:
 
             try:
                 if media:
-                    await self.bot.send_photo(r["group_id"], media, caption=msg_text2, reply_markup=buy_kb(token_name, mint, parse_mode="HTML"))
+                    await self.bot.send_photo(
+                        chat_id,
+                        media,
+                        caption=msg_text2,
+                        reply_markup=buy_kb(token_name, mint),
+                        parse_mode="HTML",
+                    )
                 else:
-                    await self.bot.send_message(r["group_id"], msg_text2, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True, parse_mode="HTML")
+                    await self.bot.send_message(
+                        chat_id,
+                        msg_text2,
+                        reply_markup=buy_kb(token_name, mint),
+                        disable_web_page_preview=True,
+                        parse_mode="HTML",
+                    )
             except Exception:
                 pass
 
@@ -225,6 +284,7 @@ class BuyWatcher:
                     msg_text_channel,
                     reply_markup=buy_kb(token_name, mint),
                     disable_web_page_preview=True,
+                    parse_mode="HTML",
                 )
             except Exception:
                 pass
