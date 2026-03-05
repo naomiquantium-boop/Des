@@ -13,7 +13,8 @@ class Settings(BaseModel):
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
     # Where users book ads. Used for the clickable "Advertise here" line.
-    BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/DevAtPumpTools")
+    # IMPORTANT: Keep this fixed to avoid misconfiguration via env vars.
+    BOOK_ADS_URL: str = "https://t.me/DevAtPumpTools"
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 

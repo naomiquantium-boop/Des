@@ -86,6 +86,13 @@ async def cfg_tg(msg: Message, state: FSMContext):
     t = (msg.text or "").strip()
     if t.lower() == "skip":
         t = ""
+    if t:
+        if t.startswith("@"):  # @handle
+            t = f"https://t.me/{t[1:]}"
+        elif t.startswith("t.me/"):
+            t = "https://" + t
+        elif t.startswith("http://"):
+            t = "https://" + t[len("http://"):]
     await state.update_data(telegram_link=t)
     await msg.answer("Optional: send a photo (logo/banner) to attach to buy posts, or type `skip`.", parse_mode="Markdown", reply_markup=wizard_nav_kb(back="cfg:start"))
     await state.set_state(Cfg.media)

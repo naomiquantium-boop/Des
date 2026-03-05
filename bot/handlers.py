@@ -114,6 +114,14 @@ async def addtoken(msg: Message, command: CommandObject, db: DB):
     parts = [p.strip() for p in command.args.split("|")]
     mint = parts[0]
     tg_link = parts[1] if len(parts) > 1 and parts[1] else None
+    if tg_link:
+        t = tg_link.strip()
+        if t.startswith("@"):  # @handle
+            tg_link = f"https://t.me/{t[1:]}"
+        elif t.startswith("t.me/"):
+            tg_link = "https://" + t
+        elif t.startswith("http://"):
+            tg_link = "https://" + t[len("http://"):]
     conn = await db.connect()
     # Save token for channel posting; store optional telegram link so token title/footer is clickable
     await conn.execute(
