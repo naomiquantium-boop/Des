@@ -50,10 +50,28 @@ class LeaderboardUpdater:
         )
         rows = await cur.fetchall()
 
+        # also include tokens that are actively tracked so newly added tokens can appear
+        cur2 = await conn.execute("SELECT DISTINCT mint FROM tracked_tokens ORDER BY created_at DESC LIMIT 50")
+        tracked = [r[0] for r in await cur2.fetchall()]
+
         leaderboard: List[Tuple[int,str,float]] = []
+        seen: set[str] = set()
         rank = 1
         for r in rows:
             mint = r["mint"]
+            seen.add(mint)
+            meta = await fetch_token_meta(mint)
+            sym = (meta.get("symbol") or meta.get("name") or mint[:6]).replace('$','')
+            pct = await self._pct_change_24h(conn, mint, now)
+            leaderboard.append((rank, sym, pct))
+            rank += 1
+
+        for mint in tracked:
+            if len(leaderboard) >= 10:
+                break
+            if mint in seen:
+                continue
+            seen.add(mint)
             meta = await fetch_token_meta(mint)
             sym = (meta.get("symbol") or meta.get("name") or mint[:6]).replace('$','')
             pct = await self._pct_change_24h(conn, mint, now)
@@ -78,9 +96,15 @@ class LeaderboardUpdater:
                     chat_id=settings.POST_CHANNEL,
                     message_id=int(mid),
                     reply_markup=leaderboard_kb(),
+                    disable_web_page_preview=True,
                 )
+            except TelegramBadRequest as e:
+                # Don't spam when text is unchanged
+                if "message is not modified" in str(e).lower():
+                    return
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
             except Exception:
-                # if edit fails (deleted), resend
                 msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
 
