@@ -184,7 +184,7 @@ class BuyWatcher:
         # send to groups (respect group settings, but never below global min)
         for r in tgt["groups"]:
             min_buy = max(float(settings.MIN_BUY_DEFAULT_SOL), float(r["min_buy_sol"]))
-            if spent_sol and spent_sol < min_buy:
+            if spent_sol is None or spent_sol < min_buy:
                 continue
             emoji = r["emoji"]
             tg = r["telegram_link"] or None
@@ -209,9 +209,9 @@ class BuyWatcher:
 
             try:
                 if media:
-                    await self.bot.send_photo(r["group_id"], media, caption=msg_text2, reply_markup=buy_kb(token_name, mint))
+                    await self.bot.send_photo(r["group_id"], media, caption=msg_text2, reply_markup=buy_kb(token_name, mint, parse_mode="HTML"))
                 else:
-                    await self.bot.send_message(r["group_id"], msg_text2, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
+                    await self.bot.send_message(r["group_id"], msg_text2, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True, parse_mode="HTML")
             except Exception:
                 pass
 

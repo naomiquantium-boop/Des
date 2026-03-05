@@ -51,8 +51,16 @@ class LeaderboardUpdater:
         rows = await cur.fetchall()
 
         # also include tokens that are actively tracked so newly added tokens can appear
-        cur2 = await conn.execute("SELECT DISTINCT mint FROM tracked_tokens ORDER BY created_at DESC LIMIT 50")
-        tracked = [r[0] for r in await cur2.fetchall()]
+        # tracked_tokens.mint is PRIMARY KEY, so DISTINCT is unnecessary (and can break ORDER BY on sqlite).
+        cur2 = await conn.execute("SELECT mint FROM tracked_tokens ORDER BY created_at DESC LIMIT 50")
+        tracked = [r["mint"] for r in await cur2.fetchall()]
+
+        # also include tokens configured in active groups so they appear even if owner didn't /addtoken
+        cur_g = await conn.execute("SELECT token_mint FROM group_settings WHERE is_active=1 ORDER BY created_at DESC")
+        group_mints = [r["token_mint"] for r in await cur_g.fetchall()]
+        for m in group_mints:
+            if m not in tracked:
+                tracked.append(m)
 
         leaderboard: List[Tuple[int,str,float]] = []
         seen: set[str] = set()
