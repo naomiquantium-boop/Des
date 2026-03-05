@@ -19,11 +19,27 @@ def fmt_num(x: float, decimals: int = 2) -> str:
     except Exception:
         return str(x)
 
-def _a(label: str, url: Optional[str]) -> str:
+def _norm_url(url: Optional[str]) -> Optional[str]:
+    """Normalize common Telegram inputs into a safe clickable URL."""
     if not url:
+        return None
+    u = url.strip()
+    if not u:
+        return None
+    if u.startswith("@"):  # @handle
+        return f"https://t.me/{u[1:]}"
+    if u.startswith("t.me/"):
+        return "https://" + u
+    if u.startswith("http://"):
+        return "https://" + u[len("http://"):]
+    return u
+
+
+def _a(label: str, url: Optional[str]) -> str:
+    u = _norm_url(url)
+    if not u:
         return label
-    # Telegram HTML: <a href="...">label</a>
-    return f'<a href="{url}">{label}</a>'
+    return f'<a href="{u}">{label}</a>'
 
 def build_buy_message_group(
     token_symbol: str,
