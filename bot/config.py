@@ -12,7 +12,8 @@ class Settings(BaseModel):
     OWNER_ID: int = int(_get("OWNER_ID"))
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
-    BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/PumpToolsBuyBot?start=ads")
+    # Where users book ads. Used for the clickable "Advertise here" line.
+    BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/DevAtPumpTools")
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 
@@ -26,7 +27,8 @@ class Settings(BaseModel):
     ADS_24H_PRICE_SOL: float = float(_get("ADS_24H_PRICE_SOL", "3"))
 
     POLL_INTERVAL_SEC: int = int(_get("POLL_INTERVAL_SEC", "4"))
-    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.1"))
+    # Global minimum buy. Any buy smaller than this is ignored (group + channel).
+    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.7"))
 
     JUPITER_PRICE_URL: str = _get("JUPITER_PRICE_URL", "https://price.jup.ag/v6/price?ids=SOL")
 
