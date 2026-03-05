@@ -101,6 +101,11 @@ class BuyWatcher:
         got_tokens = float(ev.get("got_tokens") or 0.0)
         buyer = ev.get("buyer") or "Unknown"
         spent_usd = spent_sol * sol_price if sol_price and spent_sol else 0.0
+
+        # Global min-buy filter for BOTH group + channel.
+        # Any event below this is ignored (reduces spam and blocks sells that come through as 0.00 SOL).
+        if spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
+            return
         now_ts = int(time.time())
         try:
             conn2 = await self.db.connect()
@@ -176,9 +181,9 @@ class BuyWatcher:
         )
 
 
-        # send to groups (respect group settings: min_buy + emoji + tg link + media)
+        # send to groups (respect group settings, but never below global min)
         for r in tgt["groups"]:
-            min_buy = float(r["min_buy_sol"])
+            min_buy = max(float(settings.MIN_BUY_DEFAULT_SOL), float(r["min_buy_sol"]))
             if spent_sol and spent_sol < min_buy:
                 continue
             emoji = r["emoji"]
@@ -210,17 +215,17 @@ class BuyWatcher:
             except Exception:
                 pass
 
-                # also post group buys to the main channel (trending channel) if configured
-        if settings.POST_CHANNEL:
+        # Post to channel ONCE if:
+        # - channel is configured AND
+        # - token is either configured in a group OR owner-added for channel-only mode.
+        if settings.POST_CHANNEL and (tgt.get("groups") or tgt.get("post_channel")):
             try:
-                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
-            except Exception:
-                pass
-
-# send to channel if owner added token
-        if tgt.get("post_channel"):
-            try:
-                await self.bot.send_message(settings.POST_CHANNEL, msg_text_channel, reply_markup=buy_kb(token_name, mint), disable_web_page_preview=True)
+                await self.bot.send_message(
+                    settings.POST_CHANNEL,
+                    msg_text_channel,
+                    reply_markup=buy_kb(token_name, mint),
+                    disable_web_page_preview=True,
+                )
             except Exception:
                 pass
 

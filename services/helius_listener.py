@@ -48,9 +48,12 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
             if nt.get("fromUserAccount") == buyer:
                 spent_lamports += int(nt.get("amount", 0))
         spent_sol = spent_lamports / 1_000_000_000 if spent_lamports else 0.0
+        # IMPORTANT:
+        # We only treat this as a BUY if we can see a native SOL outflow from the receiver.
+        # This filters out sells (where the mint transfer is to a pool/program) and prevents
+        # "Spent: 0.00 SOL" spam posts.
         if spent_sol <= 0:
-            # sometimes wSOL used; keep as unknown (0) but still treat as buy
-            spent_sol = 0.0
+            return None
         return {
             "buyer": buyer,
             "got_tokens": amount,
