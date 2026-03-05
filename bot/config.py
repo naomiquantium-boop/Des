@@ -12,9 +12,6 @@ class Settings(BaseModel):
     OWNER_ID: int = int(_get("OWNER_ID"))
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
-    BUY_LINK_TEMPLATE: str = _get("BUY_LINK_TEMPLATE", "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}")
-    # Where users should be sent to buy/activate ads (used to hyperlink "Advertise here")
-    # Default: bot deep-link that opens the Ads flow.
     BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/PumpToolsBuyBot?start=ads")
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
@@ -29,7 +26,7 @@ class Settings(BaseModel):
     ADS_24H_PRICE_SOL: float = float(_get("ADS_24H_PRICE_SOL", "3"))
 
     POLL_INTERVAL_SEC: int = int(_get("POLL_INTERVAL_SEC", "4"))
-    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.07"))
+    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.1"))
 
     JUPITER_PRICE_URL: str = _get("JUPITER_PRICE_URL", "https://price.jup.ag/v6/price?ids=SOL")
 

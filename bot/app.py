@@ -17,17 +17,17 @@ from services.leaderboard import LeaderboardUpdater
 async def _migrate(db: DB):
     conn = await db.connect()
     for stmt in CREATE_TABLES:
-        await conn.execute(stmt)
-    # Lightweight schema upgrades for SQLite (safe to run repeatedly)
-    for alter in [
-        "ALTER TABLE tracked_tokens ADD COLUMN telegram_link TEXT;",
-        "ALTER TABLE tracked_tokens ADD COLUMN emoji TEXT;",
-        "ALTER TABLE ads ADD COLUMN url TEXT;",
-    ]:
         try:
-            await conn.execute(alter)
+            await conn.execute(stmt)
         except Exception:
             pass
+
+    # best-effort schema upgrades
+    try:
+        await conn.execute("ALTER TABLE tracked_tokens ADD COLUMN telegram_link TEXT")
+    except Exception:
+        pass
+
     await conn.commit()
     await conn.close()
 
