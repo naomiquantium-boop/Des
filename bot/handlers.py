@@ -111,9 +111,19 @@ async def addtoken(msg: Message, command: CommandObject, db: DB):
         return
     if not command.args:
         return await msg.reply("Usage: /addtoken <MINT> | <telegram_link (optional)>")
-    parts = [p.strip() for p in command.args.split("|")]
-    mint = parts[0]
-    tg_link = parts[1] if len(parts) > 1 and parts[1] else None
+
+    raw = command.args.strip()
+    # Accept BOTH formats:
+    # 1) /addtoken MINT | https://t.me/Project
+    # 2) /addtoken MINT https://t.me/Project
+    if "|" in raw:
+        parts = [p.strip() for p in raw.split("|")]
+        mint = parts[0]
+        tg_link = parts[1] if len(parts) > 1 and parts[1] else None
+    else:
+        bits = raw.split()
+        mint = bits[0]
+        tg_link = " ".join(bits[1:]).strip() if len(bits) > 1 else None
     if tg_link:
         t = tg_link.strip()
         if t.startswith("@"):  # @handle
