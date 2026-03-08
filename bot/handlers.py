@@ -434,7 +434,7 @@ async def advert_pick_token(cq: CallbackQuery, state: FSMContext, db: DB):
         f"💎 Fill in the advert form to finish.\nToken: <b>{label}</b>",
         parse_mode="HTML",
     )
-    await cq.message.answer("⬇️ Send your Telegram group/channel link (e.g. https://t.me/pumptools)")
+    await cq.message.answer("⬇️ Send your Telegram group/channel link (e.g. https://t.me/PumpToolsPortal)")
     await cq.answer()
 
 
@@ -514,11 +514,11 @@ async def trending_package(cq: CallbackQuery, state: FSMContext, db: DB, rpc: So
     if action == "continue":
         if not data.get("link"):
             await state.set_state(TrendingFlow.link)
-            await cq.message.answer("⬇️ Send your Telegram group/channel link.")
+            await cq.message.answer("⬇️ Send your Telegram group/channel link (e.g. https://t.me/PumpToolsPortal)")
             return await cq.answer()
         package = data.get("package", "1h")
         price, seconds, _ = TREND_PRICES[package]
-        invoice_id = await _create_invoice(db, cq.from_user.id, cq.from_user.username, data["token_mint"], "trending", data.get("link"), None, data.get("emoji"), price, seconds)
+        invoice_id = await _create_invoice(db, cq.from_user.id, cq.from_user.username, data["token_mint"], "trending", data.get("link"), None, None, price, seconds)
         text, amount = await _invoice_text(db, invoice_id)
         await cq.message.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
         await state.clear()
@@ -529,17 +529,67 @@ async def trending_package(cq: CallbackQuery, state: FSMContext, db: DB, rpc: So
 
 @router.message(TrendingFlow.link)
 async def trending_link(msg: Message, state: FSMContext):
-    await state.update_data(link=(msg.text or "").strip(), emoji="")
+    await state.update_data(link=(msg.text or "").strip())
+    await state.set_state(TrendingFlow.package)
     data = await state.get_data()
     package = data.get("package", "1h")
     price, _, label = TREND_PRICES[package]
-    await state.set_state(TrendingFlow.package)
     await msg.answer(
         f"📊 Almost done. Choose your Trending package, then provide a link.\n"
         f"Token: {data.get('token_label', 'Token')}\nDuration: {label}\nPrice: {price:g} SOL\nLink: {data.get('link') or '—'}",
         reply_markup=trending_package_kb(package),
-        disable_web_page_preview=True,
     )
+
+
+
+@router.message(AdvertFlow.duration)
+async def advert_duration_text(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
+    txt = (msg.text or '').strip().lower()
+    key = {'1 day':'1d','3 days':'3d','7 days':'7d'}.get(txt)
+    if not key:
+        return
+    price, seconds, label = ADS_PRICES[key]
+    data = await state.get_data()
+    invoice_id = await _create_invoice(db, msg.from_user.id, msg.from_user.username, data["token_mint"], "ad", data.get("link"), data.get("content"), None, price, seconds)
+    text, amount = await _invoice_text(db, invoice_id)
+    await msg.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
+    await state.clear()
+    asyncio.create_task(_watch_invoice(msg.bot, db, rpc, msg.chat.id, invoice_id))
+
+
+@router.message(TrendingFlow.package)
+async def trending_package_text(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
+    txt = (msg.text or '').strip().lower()
+    mapping = {
+        '1 hours':'1h','1 hour':'1h','3 hours':'3h','3 hour':'3h','6 hours':'6h','6 hour':'6h',
+        '9 hours':'9h','9 hour':'9h','12 hours':'12h','12 hour':'12h','24 hours':'24h','24 hour':'24h',
+        'continue →':'continue','continue':'continue'
+    }
+    action = mapping.get(txt)
+    if not action:
+        return
+    data = await state.get_data()
+    if action in TREND_PRICES:
+        await state.update_data(package=action)
+        price, _, label = TREND_PRICES[action]
+        await msg.answer(
+            f"📊 Almost done. Choose your Trending package, then provide a link.\n"
+            f"Token: {data.get('token_label', 'Token')}\nDuration: {label}\nPrice: {price:g} SOL\nLink: {data.get('link') or '—'}",
+            reply_markup=trending_package_kb(action),
+        )
+        return
+    if action == 'continue':
+        if not data.get('link'):
+            await state.set_state(TrendingFlow.link)
+            await msg.answer('⬇️ Send your Telegram group/channel link (e.g. https://t.me/PumpToolsPortal)')
+            return
+        package = data.get('package', '1h')
+        price, seconds, _ = TREND_PRICES[package]
+        invoice_id = await _create_invoice(db, msg.from_user.id, msg.from_user.username, data['token_mint'], 'trending', data.get('link'), None, None, price, seconds)
+        text, amount = await _invoice_text(db, invoice_id)
+        await msg.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
+        await state.clear()
+        asyncio.create_task(_watch_invoice(msg.bot, db, rpc, msg.chat.id, invoice_id))
 
 
 @router.callback_query(F.data.startswith("invoice:refresh:"))
