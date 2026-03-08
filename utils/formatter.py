@@ -58,7 +58,7 @@ def _ad_line(ad_text: str | None, ad_link: str | None = None) -> str:
     return _default_ad_line()
 
 
-def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url, price_usd, mcap_usd, tg_url, ad_text, ad_link):
+def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url, price_usd, mcap_usd, tg_url, ad_text, ad_link, chart_url=None):
     title = f'🪐 {_a(token_symbol, tg_url)} Buy!'
     count = max(3, min(12, int(spent_sol * 4) or 3))
     usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
@@ -71,7 +71,7 @@ def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url,
     if mcap_usd is not None:
         lines.append(f"📊 MarketCap: ${fmt_num(mcap_usd, 0)}")
     lines.append("")
-    lines.append(f'🤍 {_a("Listing", settings.LISTING_URL)} | 📈 {_a("Chart", tx_url)}')
+    lines.append(f'🤍 {_a("Listing", settings.LISTING_URL)} | 📈 {_a("Chart", chart_url or tx_url)}')
     lines.append("")
     lines.append(_ad_line(ad_text, ad_link))
     return "\n".join(lines)
