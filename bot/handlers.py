@@ -127,7 +127,9 @@ async def _invoice_text(db: DB, invoice_id: int) -> tuple[str, float]:
         f"Paying for: <b>{title}</b>\n\n"
         f"Wallet:\n<code>{inv['wallet']}</code>\n"
         f"Wallet Balance: 0 SOL\n\n"
-        f"⋙ Please send <b>{inv['amount_sol']:g} SOL</b> to the wallet above"
+        f"⋙ Please send <b>{inv['amount_sol']:g} SOL</b> to the wallet above\n\n"
+        f"After payment, the bot verifies it automatically in the background.\n"
+        f"You can also tap <b>Refresh</b> to check instantly."
     )
     return text, float(inv["amount_sol"])
 
