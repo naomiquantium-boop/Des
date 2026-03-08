@@ -1,31 +1,54 @@
-# Pumptools Telegram Buy Bot
+# PumpTools BuyBot (Solana + Pump.fun)
 
-Railway-ready Solana + Pump.fun Telegram buy bot with:
-- group buy posts
-- trending channel buy posts
-- trending leaderboard footer: `To trend add @Pump_ToolsBot in your group`
-- `🤍 Listing | 📈 Chart` row in buy posts
-- default ad text: `Promote here with Pumptools Ads`
-- owner-only force add / force trending / force leaderboard controls
-- private main menu buttons similar to the Maziton flow
+A Telegram BuyBot focused on **Solana** (including Pump.fun tokens) with:
+- **Group setup wizard** (no commands needed for group admins)
+- **Min-buy filter** (admins type any SOL amount)
+- **SOL → USD** on the "Spent" line
+- **Ads under buys** with **on-chain payment verification**
+- **Owner controls**: add tokens to track and post buys directly to a channel
 
-## Deploy on Railway
-1. Upload this repo to GitHub.
-2. Create a Railway project from the repo.
-3. Add the variables from `.env.example`.
-4. Deploy.
+> Trending/leaderboard is intentionally NOT included (separate bot).
 
-## Important
-- Make the bot admin in groups/channels where it should post.
-- For reliable buy detection, set `HELIUS_API_KEY` and use a Helius RPC URL.
-- The bot uses SQLite by default so it runs easily on Railway volumes.
+## What you need
+1. A Telegram bot token from @BotFather
+2. A Solana RPC endpoint (WebSocket + HTTPS). Recommended: Helius.
+3. (Recommended) `HELIUS_API_KEY` for reliable buy detection via Helius Enhanced Transactions API.
+   - Without it, the bot still runs, but buy detection falls back to basic polling and may miss swaps.
+
+## Deploy (Railway)
+1. Push this repo to GitHub
+2. Create a new Railway project from the repo
+3. Add variables (see `.env.example`)
+4. Deploy
+
+## Group usage
+- Add the bot to your group
+- Make it **Admin** (send messages + embed links)
+- Tap **Configure BuyBot**
+- Follow the wizard:
+  - Token mint (CA)
+  - Minimum buy in SOL
+  - Emoji
+  - Telegram link
+  - Optional media (photo)
+  - Activate
+
+## Ads
+In any group where the bot is active, run:
+- `/ads` → choose duration → send ad text + tx signature
+The bot verifies the payment to `PAYMENT_WALLET` and then shows your ad under buys while active.
 
 ## Owner commands
-- `/forceadd <mint> | <telegram link optional>`
-- `/forcetrending <mint>`
-- `/forceleaderboard <mint>`
-- `/setglobalad <text>`
+- `/addtoken <MINT>` → start tracking token globally and post buys to `POST_CHANNEL`
+- `/removetoken <MINT>`
+- `/setad <text>` → set global fallback ad text (owner only)
 - `/status`
 
-## Notes
-This is a deployable starter focused on your requested style and flows. You can extend the UI pages, multilingual copy, and scoring rules further.
+## Notes on "buy detection"
+This project detects buys by polling **parsed transactions** for the token mint address using:
+- Helius Enhanced Transactions API (best)
+It identifies swaps where:
+- Buyer spent SOL (or wSOL) and received the target token.
+
+You can adjust polling and thresholds in env vars.
+
