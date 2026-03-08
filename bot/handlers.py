@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import re
 import time
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
@@ -14,28 +15,38 @@ from bot.keyboards import (
     trending_package_kb,
     advert_duration_kb,
     invoice_kb,
+    lang_kb,
+    token_action_kb,
 )
-from services.payment_verifier import verify_sol_transfer, find_recent_payment
+from services.payment_verifier import find_recent_payment
 from services.ads_service import AdsService
 from services.token_meta import fetch_token_meta
 from database.db import DB
 from utils.solana_rpc import SolanaRPC
 
 router = Router()
+MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 class TrendingFlow(StatesGroup):
-    token = State()
     package = State()
     link = State()
     emoji = State()
 
 
 class AdvertFlow(StatesGroup):
-    token = State()
     link = State()
     content = State()
     duration = State()
+
+
+class AddTokenFlow(StatesGroup):
+    mint = State()
+    tg = State()
+
+
+class EditTokenFlow(StatesGroup):
+    tg = State()
 
 
 TREND_PRICES = {
@@ -56,6 +67,21 @@ ADS_PRICES = {
 def _is_owner(msg: Message | CallbackQuery) -> bool:
     user = msg.from_user
     return bool(user and user.id == settings.OWNER_ID)
+
+
+def _norm_tg(v: str | None) -> str | None:
+    if not v:
+        return None
+    t = v.strip()
+    if not t or t.lower() == "skip":
+        return None
+    if t.startswith("@"):
+        return f"https://t.me/{t[1:]}"
+    if t.startswith("t.me/"):
+        return f"https://{t}"
+    if t.startswith("http://"):
+        return f"https://{t[7:]}"
+    return t
 
 
 async def _tokens_for_user(db: DB, user_id: int) -> list[tuple[str, str]]:
@@ -145,12 +171,41 @@ async def _watch_invoice(bot, db: DB, rpc: SolanaRPC, chat_id: int, invoice_id: 
             return
 
 
+async def _upsert_tracked_token(db: DB, mint: str, telegram_link: str | None = None):
+    meta = await fetch_token_meta(mint)
+    conn = await db.connect()
+    await conn.execute(
+        "INSERT INTO tracked_tokens(mint, post_mode, telegram_link, symbol, name, force_trending, force_leaderboard, created_at) VALUES(?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(mint) DO UPDATE SET telegram_link=COALESCE(excluded.telegram_link, tracked_tokens.telegram_link), symbol=excluded.symbol, name=excluded.name",
+        (mint, "channel", telegram_link, meta.get("symbol"), meta.get("name"), 0, 0, int(time.time())),
+    )
+    await conn.commit()
+    await conn.close()
+    return meta
+
+
+async def _group_status_text(db: DB, group_id: int) -> str:
+    conn = await db.connect()
+    cur = await conn.execute("SELECT * FROM group_settings WHERE group_id=?", (group_id,))
+    row = await cur.fetchone()
+    await conn.close()
+    if not row:
+        return "⚙️ Group Settings\n\nNo token is active in this group yet.\nUse ➕ Add Token to set one up."
+    return (
+        "⚙️ Group Settings\n\n"
+        f"Token: <code>{row['token_mint']}</code>\n"
+        f"Min Buy: {row['min_buy_sol']:g} SOL\n"
+        f"Emoji: {row['emoji']}\n"
+        f"Telegram: {row['telegram_link'] or '—'}"
+    )
+
+
 @router.message(Command("start"))
 async def start(msg: Message, state: FSMContext, command: CommandObject | None = None):
     await state.clear()
     arg = (command.args or "").strip() if command else ""
     if msg.chat.type != "private":
-        return await msg.reply("Hi! Tap Configure to set me up (I must be admin).")
+        return await msg.reply("Pumptools main menu", reply_markup=main_menu_kb())
     if arg == "ads":
         await msg.answer("💎 Advertise your token\nPromote your token to millions of users across thousands of groups.\n\nSelect your token to continue.", reply_markup=main_menu_kb())
         return
@@ -164,12 +219,144 @@ async def menu_home(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
 
 
+@router.callback_query(F.data == "menu:lang")
+async def menu_lang(cq: CallbackQuery):
+    await cq.message.answer("Choose your buybot language.", reply_markup=lang_kb())
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("lang:set:"))
+async def lang_set(cq: CallbackQuery):
+    label = cq.data.split(":", 2)[2]
+    await cq.message.answer(f"✅ Language set to {label.title()}.")
+    await cq.answer()
+
+
+@router.callback_query(F.data == "menu:add")
+async def menu_add(cq: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(AddTokenFlow.mint)
+    await state.update_data(source_chat_id=cq.message.chat.id, source_chat_type=cq.message.chat.type)
+    await cq.message.answer("⬇️ Paste the token contract address")
+    await cq.answer()
+
+
+@router.message(AddTokenFlow.mint)
+async def add_token_mint(msg: Message, state: FSMContext, db: DB):
+    mint = (msg.text or "").strip()
+    if not MINT_RE.match(mint):
+        return await msg.reply("Send a valid Solana token mint.")
+    meta = await _upsert_tracked_token(db, mint)
+    await state.update_data(token_mint=mint, token_label=meta.get("symbol") or meta.get("name") or mint[:6])
+    if msg.chat.type in ("group", "supergroup"):
+        conn = await db.connect()
+        await conn.execute(
+            "INSERT INTO group_settings(group_id, token_mint, min_buy_sol, emoji, telegram_link, media_file_id, is_active, created_at) VALUES(?,?,?,?,?,?,1,?) "
+            "ON CONFLICT(group_id) DO UPDATE SET token_mint=excluded.token_mint, is_active=1",
+            (msg.chat.id, mint, float(settings.MIN_BUY_DEFAULT_SOL), "🟢", None, None, int(time.time())),
+        )
+        await conn.commit()
+        await conn.close()
+        await state.clear()
+        return await msg.answer(
+            f"✅ Token Added\n• Token: {meta.get('name') or meta.get('symbol') or mint[:6]}\n• Symbol: {meta.get('symbol') or '—'}\n\nNow posting buys automatically for this group.\nUse Edit to customize token settings.",
+            reply_markup=main_menu_kb(),
+        )
+    await state.set_state(AddTokenFlow.tg)
+    await msg.answer(
+        f"Token Details\nName: <b>{meta.get('name') or meta.get('symbol') or mint[:6]}</b>\nSymbol: <b>{meta.get('symbol') or '—'}</b>\n\nSend token Telegram link or type <code>skip</code>.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(AddTokenFlow.tg)
+async def add_token_tg(msg: Message, state: FSMContext, db: DB):
+    data = await state.get_data()
+    mint = data["token_mint"]
+    tg = _norm_tg(msg.text)
+    conn = await db.connect()
+    await conn.execute("UPDATE tracked_tokens SET telegram_link=COALESCE(?, telegram_link) WHERE mint=?", (tg, mint))
+    await conn.commit()
+    await conn.close()
+    await state.clear()
+    await msg.answer("✅ Token saved.", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "menu:view")
+async def menu_view(cq: CallbackQuery, db: DB):
+    tokens = await _tokens_for_user(db, cq.from_user.id)
+    if not tokens:
+        await cq.message.answer("No tracked tokens yet.")
+    else:
+        await cq.message.answer("👀 Select a token below.", reply_markup=token_list_kb(tokens, "viewtoken", back="menu:home"))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("viewtoken:"))
+async def view_token(cq: CallbackQuery, db: DB):
+    mint = cq.data.split(":", 1)[1]
+    conn = await db.connect()
+    cur = await conn.execute("SELECT * FROM tracked_tokens WHERE mint=?", (mint,))
+    row = await cur.fetchone()
+    await conn.close()
+    if not row:
+        return await cq.answer("Token not found", show_alert=True)
+    await cq.message.answer(
+        f"Token Details\nName: <b>{row['name'] or row['symbol'] or mint[:6]}</b>\nSymbol: <b>{row['symbol'] or '—'}</b>\nMint: <code>{mint}</code>\nTelegram: {row['telegram_link'] or '—'}",
+        parse_mode="HTML",
+        reply_markup=token_action_kb(mint),
+    )
+    await cq.answer()
+
+
+@router.callback_query(F.data == "menu:edit")
+async def menu_edit(cq: CallbackQuery, db: DB):
+    tokens = await _tokens_for_user(db, cq.from_user.id)
+    if not tokens:
+        await cq.message.answer("No tracked tokens yet.")
+    else:
+        await cq.message.answer("✏️ Select the token you want to edit.", reply_markup=token_list_kb(tokens, "edittoken", back="menu:home"))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("edittoken:"))
+async def edit_token(cq: CallbackQuery, state: FSMContext):
+    mint = cq.data.split(":", 1)[1]
+    await state.set_state(EditTokenFlow.tg)
+    await state.update_data(edit_mint=mint)
+    await cq.message.answer("⬇️ Send the new Telegram link for this token, or type skip to keep the current one.")
+    await cq.answer()
+
+
+@router.message(EditTokenFlow.tg)
+async def edit_token_tg(msg: Message, state: FSMContext, db: DB):
+    data = await state.get_data()
+    mint = data["edit_mint"]
+    tg = _norm_tg(msg.text)
+    if tg:
+        conn = await db.connect()
+        await conn.execute("UPDATE tracked_tokens SET telegram_link=? WHERE mint=?", (tg, mint))
+        await conn.commit()
+        await conn.close()
+    await state.clear()
+    await msg.answer("✅ Token updated.", reply_markup=main_menu_kb())
+
+
+@router.callback_query(F.data == "menu:group")
+async def menu_group(cq: CallbackQuery, db: DB):
+    if cq.message.chat.type not in ("group", "supergroup"):
+        await cq.message.answer("⚙️ Group settings work inside a group where the bot is added as admin.")
+    else:
+        await cq.message.answer(await _group_status_text(db, cq.message.chat.id), parse_mode="HTML")
+    await cq.answer()
+
+
 @router.callback_query(F.data == "menu:advert")
 async def advert_menu(cq: CallbackQuery, db: DB, state: FSMContext):
     await state.clear()
     tokens = await _tokens_for_user(db, cq.from_user.id)
     if not tokens:
-        await cq.message.answer("No tracked tokens yet. Add one with /addtoken <mint> | <telegram_link>")
+        await cq.message.answer("No tracked tokens yet. Use ➕ Add Token first.")
     else:
         await cq.message.answer(
             "💎 Advertise your token\nPromote your token to millions of users across thousands of groups.\n\nSelect your token to continue.",
@@ -179,11 +366,16 @@ async def advert_menu(cq: CallbackQuery, db: DB, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("adtoken:"))
-async def advert_pick_token(cq: CallbackQuery, state: FSMContext):
+async def advert_pick_token(cq: CallbackQuery, state: FSMContext, db: DB):
     mint = cq.data.split(":", 1)[1]
+    meta = await fetch_token_meta(mint)
+    label = meta.get("symbol") or meta.get("name") or mint[:6]
     await state.set_state(AdvertFlow.link)
-    await state.update_data(token_mint=mint)
-    await cq.message.answer("💎 Fill in the advert form to finish.\nToken selected.\n\n— FILL FORM —\n\nLink ✏️\nContent ✏️\nDuration ✏️\n\n« Return")
+    await state.update_data(token_mint=mint, token_label=label)
+    await cq.message.answer(
+        f"💎 Fill in the advert form to finish.\nToken: <b>{label}</b>",
+        parse_mode="HTML",
+    )
     await cq.message.answer("⬇️ Send your Telegram group/channel link (e.g. https://t.me/pumptools)")
     await cq.answer()
 
@@ -209,18 +401,7 @@ async def advert_duration(cq: CallbackQuery, state: FSMContext, db: DB, rpc: Sol
         return await cq.answer()
     price, seconds, label = ADS_PRICES[key]
     data = await state.get_data()
-    invoice_id = await _create_invoice(
-        db,
-        cq.from_user.id,
-        cq.from_user.username,
-        data["token_mint"],
-        "ad",
-        data.get("link"),
-        data.get("content"),
-        None,
-        price,
-        seconds,
-    )
+    invoice_id = await _create_invoice(db, cq.from_user.id, cq.from_user.username, data["token_mint"], "ad", data.get("link"), data.get("content"), None, price, seconds)
     text, amount = await _invoice_text(db, invoice_id)
     await cq.message.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
     await state.clear()
@@ -233,10 +414,11 @@ async def trending_menu(cq: CallbackQuery, db: DB, state: FSMContext):
     await state.clear()
     tokens = await _tokens_for_user(db, cq.from_user.id)
     if not tokens:
-        await cq.message.answer("No tracked tokens yet. Add one with /addtoken <mint> | <telegram_link>")
+        await cq.message.answer("No tracked tokens yet. Use ➕ Add Token first.")
     else:
         await cq.message.answer(
-            "Your token will be shown here:\n@PumpToolsTrending.\nChoose how many hours you want your token to trend.\n\nHi, please select your token below.",
+            "<blockquote>Your token will be shown here:\n@PumpToolsTrending.\nChoose how many hours you want your token to trend.</blockquote>\n\n🎉 Hi, please select your token below.",
+            parse_mode="HTML",
             reply_markup=token_list_kb(tokens, "trendtoken", back="menu:home"),
         )
     await cq.answer()
@@ -252,7 +434,7 @@ async def trending_pick_token(cq: CallbackQuery, state: FSMContext):
     price = TREND_PRICES["1h"][0]
     await cq.message.answer(
         f"📊 Almost done. Choose your Trending package, then provide a link and (optionally) a custom emoji.\n"
-        f"Token: {token_label}\nDuration: 1 Hours\nPrice: {price:g} SOL\nLink: —\n\n— CHOOSE PACKAGE —\n\n— MORE —\nLink ✏️\nEmoji (Optional) ✏️",
+        f"Token: {token_label}\nDuration: 1 Hours\nPrice: {price:g} SOL\nLink: —",
         reply_markup=trending_package_kb("1h"),
     )
     await cq.answer()
@@ -278,18 +460,7 @@ async def trending_package(cq: CallbackQuery, state: FSMContext, db: DB, rpc: So
             return await cq.answer()
         package = data.get("package", "1h")
         price, seconds, _ = TREND_PRICES[package]
-        invoice_id = await _create_invoice(
-            db,
-            cq.from_user.id,
-            cq.from_user.username,
-            data["token_mint"],
-            "trending",
-            data.get("link"),
-            None,
-            data.get("emoji"),
-            price,
-            seconds,
-        )
+        invoice_id = await _create_invoice(db, cq.from_user.id, cq.from_user.username, data["token_mint"], "trending", data.get("link"), None, data.get("emoji"), price, seconds)
         text, amount = await _invoice_text(db, invoice_id)
         await cq.message.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
         await state.clear()
@@ -343,47 +514,24 @@ async def invoice_refresh(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
     await cq.answer()
 
 
-@router.callback_query(F.data.in_({"menu:lang", "menu:edit", "menu:add", "menu:view", "menu:group"}))
-async def placeholder_menu(cq: CallbackQuery):
-    labels = {
-        "menu:lang": "Language settings will go here.",
-        "menu:edit": "Edit flow will go here.",
-        "menu:add": "Add Token: use /addtoken <mint> | <telegram_link>",
-        "menu:view": "View Tokens: use /tokens",
-        "menu:group": "Group settings are managed when the bot is added to a group.",
-    }
-    await cq.message.answer(labels.get(cq.data, "Coming soon."))
-    await cq.answer()
-
-
 @router.message(Command("tokens"))
 async def tokens_cmd(msg: Message, db: DB):
     rows = await _tokens_for_user(db, msg.from_user.id if msg.from_user else 0)
     if not rows:
         return await msg.reply("No tracked tokens.")
     text = "Tracked tokens:\n" + "\n".join([f"• {label} — <code>{mint}</code>" for mint, label in rows])
-    await msg.reply(text)
+    await msg.reply(text, parse_mode="HTML")
 
 
-@router.message(Command("addtoken"))
-async def addtoken(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg):
+@router.message(Command("forceadd"))
+async def forceadd(msg: Message, command: CommandObject, db: DB):
+    if not _is_owner(msg) or not command.args:
         return
-    if not command.args:
-        return await msg.reply("Usage: /addtoken <MINT> | <telegram_link(optional)>")
-    raw = command.args.strip()
-    parts = [p.strip() for p in raw.split("|", 1)]
+    parts = [p.strip() for p in command.args.split("|", 1)]
     mint = parts[0]
-    tg_link = parts[1] if len(parts) > 1 else None
-    meta = await fetch_token_meta(mint)
-    conn = await db.connect()
-    await conn.execute(
-        "INSERT INTO tracked_tokens(mint, post_mode, telegram_link, symbol, name, force_trending, force_leaderboard, created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(mint) DO UPDATE SET post_mode='channel', telegram_link=COALESCE(excluded.telegram_link, tracked_tokens.telegram_link), symbol=excluded.symbol, name=excluded.name",
-        (mint, 'channel', tg_link, meta.get('symbol'), meta.get('name'), 0, 0, int(time.time())),
-    )
-    await conn.commit()
-    await conn.close()
-    await msg.reply(f"✅ Tracking enabled for {mint}.")
+    tg = _norm_tg(parts[1]) if len(parts) > 1 else None
+    meta = await _upsert_tracked_token(db, mint, tg)
+    await msg.reply(f"✅ Token added: {meta.get('symbol') or meta.get('name') or mint[:6]}")
 
 
 @router.message(Command("forcetrending"))
@@ -401,8 +549,20 @@ async def forcetrending(msg: Message, command: CommandObject, db: DB):
     await msg.reply("✅ Token forced into trending.")
 
 
-@router.message(Command("setad"))
-async def setad(msg: Message, command: CommandObject, db: DB):
+@router.message(Command("forceleaderboard"))
+async def forceleaderboard(msg: Message, command: CommandObject, db: DB):
+    if not _is_owner(msg) or not command.args:
+        return
+    mint = command.args.strip().split()[0]
+    conn = await db.connect()
+    await conn.execute("UPDATE tracked_tokens SET force_leaderboard=1 WHERE mint=?", (mint,))
+    await conn.commit()
+    await conn.close()
+    await msg.reply("✅ Token forced into leaderboard.")
+
+
+@router.message(Command("setglobalad"))
+async def setglobalad(msg: Message, command: CommandObject, db: DB):
     if not _is_owner(msg) or not command.args:
         return
     conn = await db.connect()
@@ -410,24 +570,6 @@ async def setad(msg: Message, command: CommandObject, db: DB):
     await ads.set_owner_fallback(command.args.strip())
     await conn.close()
     await msg.reply("✅ Fallback ad text updated.")
-
-
-@router.message(Command("adset"))
-async def adset(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg) or not command.args:
-        return
-    parts = [p.strip() for p in command.args.split("|")]
-    if len(parts) < 3:
-        return await msg.reply("Usage: /adset <duration_hours> | <text> | <link>")
-    hours = int(parts[0])
-    text = parts[1]
-    link = parts[2]
-    now = int(time.time())
-    conn = await db.connect()
-    ads = AdsService(conn)
-    await ads.create_ad(settings.OWNER_ID, text, link, now, now + hours * 3600, f"owner:{now}", 0.0, "ad")
-    await conn.close()
-    await msg.reply("✅ Ad created.")
 
 
 @router.message(Command("status"))

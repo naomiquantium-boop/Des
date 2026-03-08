@@ -5,30 +5,6 @@ from bot.config import settings
 BUY_TEMPLATE = "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}"
 
 
-def configure_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="⚙️ Configure BuyBot", callback_data="cfg:start")
-    return kb.as_markup()
-
-
-def wizard_nav_kb(back: str | None = None, cancel: bool = True) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    if back:
-        kb.button(text="⬅️ Back", callback_data=back)
-    if cancel:
-        kb.button(text="✖️ Cancel", callback_data="cfg:cancel")
-    kb.adjust(2)
-    return kb.as_markup()
-
-
-def confirm_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Activate", callback_data="cfg:activate")
-    kb.button(text="✖️ Cancel", callback_data="cfg:cancel")
-    kb.adjust(2)
-    return kb.as_markup()
-
-
 def buy_kb(mint: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Metrics", url=BUY_TEMPLATE.format(mint=mint))
@@ -56,6 +32,14 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def lang_kb() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🇺🇸 English ✅", callback_data="lang:set:english")
+    kb.button(text="🇨🇳 Chinese", callback_data="lang:set:chinese")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
 def token_list_kb(tokens: list[tuple[str, str]], prefix: str, back: str = "menu:home") -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for mint, label in tokens:
@@ -65,15 +49,17 @@ def token_list_kb(tokens: list[tuple[str, str]], prefix: str, back: str = "menu:
     return kb.as_markup()
 
 
+def token_action_kb(mint: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✏️ Edit Telegram", callback_data=f"edittoken:{mint}")
+    kb.button(text="Listing", url=settings.LISTING_URL)
+    kb.button(text="« Return", callback_data="menu:home")
+    kb.adjust(2, 1)
+    return kb.as_markup()
+
+
 def trending_package_kb(selected: str | None = None) -> InlineKeyboardMarkup:
-    plans = [
-        ("1h", "1 Hours"),
-        ("3h", "3 Hours"),
-        ("6h", "6 Hours"),
-        ("9h", "9 Hours"),
-        ("12h", "12 Hours"),
-        ("24h", "24 Hours"),
-    ]
+    plans = [("1h", "1 Hours"), ("3h", "3 Hours"), ("6h", "6 Hours"), ("9h", "9 Hours"), ("12h", "12 Hours"), ("24h", "24 Hours")]
     kb = InlineKeyboardBuilder()
     for key, label in plans:
         prefix = "✅ " if selected == key else "☑️ "
