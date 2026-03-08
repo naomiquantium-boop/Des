@@ -2,10 +2,7 @@ from __future__ import annotations
 from bot.config import settings
 from typing import Optional
 
-RANK_EMOJIS = {
-    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
-    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
-}
+RANK_EMOJIS = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟"}
 
 
 def short_addr(a: str, left: int = 4, right: int = 4) -> str:
@@ -61,26 +58,13 @@ def _ad_line(ad_text: str | None, ad_link: str | None = None) -> str:
     return _default_ad_line()
 
 
-def build_buy_message_group(
-    token_symbol: str,
-    emoji: str,
-    spent_sol: float,
-    spent_usd: float,
-    got_tokens: float,
-    buyer: str,
-    tx_url: str,
-    price_usd: Optional[float],
-    mcap_usd: Optional[float],
-    tg_url: Optional[str],
-    ad_text: Optional[str],
-    ad_link: Optional[str],
-) -> str:
-    title = f'🪐 {_a(token_symbol, tg_url)} Buy! —\nSolana'
+def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url, price_usd, mcap_usd, tg_url, ad_text, ad_link):
+    title = f'🪐 {_a(token_symbol, tg_url)} Buy!'
     count = max(3, min(12, int(spent_sol * 4) or 3))
     usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
     lines = [title, "", emoji_bar(emoji, count), ""]
     lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL{usd_part}")
-    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {token_symbol}")
+    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {_a(token_symbol, tg_url)}")
     lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
     if price_usd is not None:
         lines.append(f"🏷 Price: ${fmt_num(price_usd, 6)}")
@@ -93,44 +77,19 @@ def build_buy_message_group(
     return "\n".join(lines)
 
 
-def build_buy_message_channel(
-    token_symbol: str,
-    emoji: str,
-    spent_sol: float,
-    spent_usd: float,
-    got_tokens: float,
-    buyer: str,
-    tx_url: str,
-    price_usd: Optional[float],
-    mcap_usd: Optional[float],
-    tg_url: Optional[str],
-    ad_text: Optional[str],
-    ad_link: Optional[str],
-) -> str:
-    title = f'🪐 {_a(token_symbol, tg_url)} Buy!'
-    count = max(3, min(18, int(spent_sol * 10) or 3))
-    usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
-    lines = [title, "", emoji_bar(emoji, count), ""]
-    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL{usd_part}")
-    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {token_symbol}")
-    lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
-    if price_usd is not None:
-        lines.append(f"🏷 Price: ${fmt_num(price_usd, 6)}")
-    if mcap_usd is not None:
-        lines.append(f"📊 MarketCap: ${fmt_num(mcap_usd, 0)}")
-    lines.append("")
-    lines.append(f'🤍 {_a("Listing", settings.LISTING_URL)} | 📈 {_a("Chart", tx_url)}')
-    lines.append("")
-    lines.append(_ad_line(ad_text, ad_link))
-    return "\n".join(lines)
+def build_buy_message_group(**kwargs) -> str:
+    return _build(**kwargs)
+
+
+def build_buy_message_channel(**kwargs) -> str:
+    return _build(**kwargs)
 
 
 def build_leaderboard_message(rows: list[tuple[int, str, str, float]], footer_handle: str) -> str:
     lines = ["🟢 PUMPTOOLS TRENDING", ""]
     for rank, label, metric, pct in rows[:10]:
         sign = "+" if pct > 0 else ""
-        rank_icon = RANK_EMOJIS.get(rank, str(rank))
-        lines.append(f"{rank_icon} <a href=\"{settings.LISTING_URL}\">{label}</a> | {metric} | {sign}{pct:.0f}%")
+        lines.append(f'{RANK_EMOJIS.get(rank, str(rank))} <a href="{settings.LISTING_URL}">{label}</a> | {metric} | {sign}{pct:.0f}%')
     lines.append("")
     lines.append(f"<blockquote>💬 To trend add {footer_handle} in your group</blockquote>")
     return "\n".join(lines)
