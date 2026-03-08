@@ -529,17 +529,7 @@ async def trending_package(cq: CallbackQuery, state: FSMContext, db: DB, rpc: So
 
 @router.message(TrendingFlow.link)
 async def trending_link(msg: Message, state: FSMContext):
-    await state.update_data(link=(msg.text or "").strip())
-    await state.set_state(TrendingFlow.emoji)
-    await msg.answer("Optional: send a custom emoji or type skip.")
-
-
-@router.message(TrendingFlow.emoji)
-async def trending_emoji(msg: Message, state: FSMContext):
-    emoji = (msg.text or "").strip()
-    if emoji.lower() == "skip":
-        emoji = ""
-    await state.update_data(emoji=emoji)
+    await state.update_data(link=(msg.text or "").strip(), emoji="")
     data = await state.get_data()
     package = data.get("package", "1h")
     price, _, label = TREND_PRICES[package]
@@ -548,6 +538,7 @@ async def trending_emoji(msg: Message, state: FSMContext):
         f"📊 Almost done. Choose your Trending package, then provide a link.\n"
         f"Token: {data.get('token_label', 'Token')}\nDuration: {label}\nPrice: {price:g} SOL\nLink: {data.get('link') or '—'}",
         reply_markup=trending_package_kb(package),
+        disable_web_page_preview=True,
     )
 
 
