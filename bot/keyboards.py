@@ -1,5 +1,6 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.types import InlineKeyboardMarkup
+from urllib.parse import quote
 from bot.config import settings
 
 BUY_TEMPLATE = "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}"
@@ -92,6 +93,7 @@ def invoice_kb(invoice_id: int, amount_sol: float) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="« Return", callback_data="menu:home")
     kb.button(text="↻ Refresh", callback_data=f"invoice:refresh:{invoice_id}")
-    kb.button(text=f"Pay {amount_sol:g} SOL", url=f"solana:{settings.PAYMENT_WALLET}")
+    pay_url = f"https://phantom.app/ul/v1/transfer?recipient={quote(settings.PAYMENT_WALLET)}&amount={amount_sol:g}"
+    kb.button(text=f"Pay {amount_sol:g} SOL", url=pay_url)
     kb.adjust(2, 1)
     return kb.as_markup()

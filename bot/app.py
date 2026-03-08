@@ -33,6 +33,7 @@ async def _migrate(db: DB):
         "ALTER TABLE tracked_tokens ADD COLUMN trend_until_ts INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE ads ADD COLUMN link TEXT",
         "ALTER TABLE ads ADD COLUMN kind TEXT NOT NULL DEFAULT 'ad'",
+        "ALTER TABLE token_settings ADD COLUMN media_kind TEXT NOT NULL DEFAULT 'photo'",
     ]
     for stmt in upgrades:
         try:
