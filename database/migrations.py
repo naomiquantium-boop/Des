@@ -26,6 +26,24 @@ CREATE TABLE IF NOT EXISTS tracked_tokens (
 );
 """,
 """
+CREATE TABLE IF NOT EXISTS token_settings (
+  mint TEXT PRIMARY KEY,
+  buy_step INTEGER NOT NULL DEFAULT 1,
+  min_buy REAL NOT NULL DEFAULT 0,
+  custom_link TEXT,
+  emoji TEXT NOT NULL DEFAULT '🟢',
+  media_file_id TEXT,
+  show_media INTEGER NOT NULL DEFAULT 1,
+  show_mcap INTEGER NOT NULL DEFAULT 1,
+  show_price INTEGER NOT NULL DEFAULT 1,
+  show_holders INTEGER NOT NULL DEFAULT 1,
+  show_dex INTEGER NOT NULL DEFAULT 1,
+  chart_source TEXT NOT NULL DEFAULT 'DexS',
+  language TEXT NOT NULL DEFAULT 'English',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+""",
+"""
 CREATE TABLE IF NOT EXISTS ads (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   created_by INTEGER NOT NULL,
