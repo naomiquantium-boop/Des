@@ -12,10 +12,9 @@ def _get(name: str, default: str | None = None) -> str:
 class Settings(BaseModel):
     BOT_TOKEN: str = _get("BOT_TOKEN")
     OWNER_ID: int = int(_get("OWNER_ID"))
+    BOT_USERNAME: str = _get("BOT_USERNAME", "PumpToolsBuyBot")
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
-    BOOK_ADS_URL: str = _get("BOOK_ADS_URL", "https://t.me/Pump_ToolsBot")
-    LEADERBOARD_FOOTER: str = "To trend add @Pump_ToolsBot in your group"
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 
@@ -25,22 +24,24 @@ class Settings(BaseModel):
 
     PAYMENT_WALLET: str = _get("PAYMENT_WALLET")
     TRENDING_1H_PRICE_SOL: float = float(_get("TRENDING_1H_PRICE_SOL", "1"))
-    TRENDING_3H_PRICE_SOL: float = float(_get("TRENDING_3H_PRICE_SOL", "2"))
-    TRENDING_6H_PRICE_SOL: float = float(_get("TRENDING_6H_PRICE_SOL", "3"))
-    TRENDING_12H_PRICE_SOL: float = float(_get("TRENDING_12H_PRICE_SOL", "5"))
-    TRENDING_24H_PRICE_SOL: float = float(_get("TRENDING_24H_PRICE_SOL", "8"))
+    TRENDING_3H_PRICE_SOL: float = float(_get("TRENDING_3H_PRICE_SOL", "3"))
+    TRENDING_6H_PRICE_SOL: float = float(_get("TRENDING_6H_PRICE_SOL", "5"))
+    TRENDING_9H_PRICE_SOL: float = float(_get("TRENDING_9H_PRICE_SOL", "7"))
+    TRENDING_12H_PRICE_SOL: float = float(_get("TRENDING_12H_PRICE_SOL", "9"))
+    TRENDING_24H_PRICE_SOL: float = float(_get("TRENDING_24H_PRICE_SOL", "15"))
+
     ADS_1D_PRICE_SOL: float = float(_get("ADS_1D_PRICE_SOL", "5"))
     ADS_3D_PRICE_SOL: float = float(_get("ADS_3D_PRICE_SOL", "12"))
     ADS_7D_PRICE_SOL: float = float(_get("ADS_7D_PRICE_SOL", "25"))
 
     POLL_INTERVAL_SEC: int = int(_get("POLL_INTERVAL_SEC", "4"))
-    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.7"))
+    MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.1"))
 
     JUPITER_PRICE_URL: str = _get("JUPITER_PRICE_URL", "https://price.jup.ag/v6/price?ids=SOL")
-    BUY_BOT_URL_TEMPLATE: str = _get("BUY_BOT_URL_TEMPLATE", "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}")
-    METRICS_URL_TEMPLATE: str = _get("METRICS_URL_TEMPLATE", "https://dexscreener.com/solana/{mint}")
-    LEADERBOARD_INTERVAL_SEC: int = int(_get("LEADERBOARD_INTERVAL_SEC", "60"))
-    DEFAULT_AD_TEXT: str = "Promote here with Pumptools Ads"
+
+    @property
+    def BOOK_ADS_URL(self) -> str:
+        return f"https://t.me/{self.BOT_USERNAME}?start=ads"
 
 
 settings = Settings()
