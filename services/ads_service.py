@@ -14,14 +14,22 @@ class AdsService:
         )
         await self.conn.commit()
 
-    async def get_active_ad(self, now_ts: Optional[int] = None) -> tuple[Optional[str], Optional[str]]:
+    async def active_ads(self, now_ts: Optional[int] = None, limit: int = 2):
         now_ts = now_ts or int(time.time())
         cur = await self.conn.execute(
-            "SELECT text, link FROM ads WHERE kind='ad' AND start_ts<=? AND end_ts>=? ORDER BY end_ts DESC LIMIT 1",
-            (now_ts, now_ts),
+            "SELECT id, text, link FROM ads WHERE kind='ad' AND start_ts<=? AND end_ts>=? ORDER BY id ASC LIMIT ?",
+            (now_ts, now_ts, limit),
         )
-        row = await cur.fetchone()
-        return (row["text"], row["link"]) if row else (None, None)
+        return await cur.fetchall()
+
+    async def get_active_ad(self, now_ts: Optional[int] = None) -> tuple[Optional[str], Optional[str]]:
+        now_ts = now_ts or int(time.time())
+        rows = await self.active_ads(now_ts=now_ts, limit=2)
+        if not rows:
+            return (None, None)
+        idx = (now_ts // 60) % len(rows)
+        row = rows[idx]
+        return (row["text"], row["link"])
 
     async def set_owner_fallback(self, text: str):
         await self.conn.execute("INSERT INTO state_kv(k,v) VALUES('owner_fallback_ad', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (text,))

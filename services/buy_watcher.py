@@ -135,7 +135,7 @@ class BuyWatcher:
 
         tx_url = TX_URL.format(sig=ev["signature"])
         tg_url = None
-        token_cfg = {"buy_step": 1, "min_buy": 0.0, "emoji": "🟢", "media_file_id": None}
+        token_cfg = {"buy_step": 1, "min_buy": 0.0, "emoji": "🟢", "media_file_id": None, "media_kind": "photo"}
         # pick a default Telegram link for this token from any active group config
         try:
             for _r in tgt.get("groups", []):
@@ -150,13 +150,13 @@ class BuyWatcher:
             conn_tg = await self.db.connect()
             cur2 = await conn_tg.execute("SELECT telegram_link FROM tracked_tokens WHERE mint=?", (mint,))
             row2 = await cur2.fetchone()
-            cur3 = await conn_tg.execute("SELECT buy_step, min_buy, emoji, media_file_id FROM token_settings WHERE mint=?", (mint,))
+            cur3 = await conn_tg.execute("SELECT buy_step, min_buy, emoji, media_file_id, media_kind FROM token_settings WHERE mint=?", (mint,))
             row3 = await cur3.fetchone()
             await conn_tg.close()
             if row2 and row2[0]:
                 tg_url = row2[0]
             if row3:
-                token_cfg = {"buy_step": row3[0] or 1, "min_buy": float(row3[1] or 0.0), "emoji": row3[2] or "🟢", "media_file_id": row3[3]}
+                token_cfg = {"buy_step": row3[0] or 1, "min_buy": float(row3[1] or 0.0), "emoji": row3[2] or "🟢", "media_file_id": row3[3], "media_kind": row3[4] or "photo"}
         except Exception:
             pass
         # group message uses group settings emoji and tg link (if set)
@@ -201,6 +201,7 @@ class BuyWatcher:
             emoji = token_cfg.get("emoji") or r["emoji"] or "🟢"
             tg = tg_url or r["telegram_link"] or None
             media = token_cfg.get("media_file_id") or r["media_file_id"]
+            media_kind = token_cfg.get("media_kind") or "photo"
             chat_id = int(r["group_id"])
             ctype = await self._chat_type(chat_id)
 
@@ -253,13 +254,22 @@ class BuyWatcher:
 
             try:
                 if media:
-                    await self.bot.send_photo(
+                    if media_kind == "animation":
+                        await self.bot.send_animation(
                         chat_id,
-                        media,
-                        caption=msg_text2,
-                        reply_markup=buy_kb(mint),
-                        parse_mode="HTML",
-                    )
+                            media,
+                            caption=msg_text2,
+                            reply_markup=buy_kb(mint),
+                            parse_mode="HTML",
+                        )
+                    else:
+                        await self.bot.send_photo(
+                            chat_id,
+                            media,
+                            caption=msg_text2,
+                            reply_markup=buy_kb(mint),
+                            parse_mode="HTML",
+                        )
                 else:
                     await self.bot.send_message(
                         chat_id,
