@@ -49,12 +49,46 @@ def token_list_kb(tokens: list[tuple[str, str]], prefix: str, back: str = "menu:
     return kb.as_markup()
 
 
-def token_action_kb(mint: str) -> InlineKeyboardMarkup:
+def token_edit_page_kb(mint: str, page: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✏️ Edit Telegram", callback_data=f"edittoken:{mint}")
-    kb.button(text="Listing", url=settings.LISTING_URL)
+    for p in (1, 2, 3):
+        kb.button(text=("✅ " if p == page else "☑️ ") + f"Page {p}", callback_data=f"editpage:{mint}:{p}")
+    kb.adjust(3)
+    if page == 1:
+        rows = [
+            ("ℹ️ Buy Step", "buy_step", "✏️ (1)"),
+            ("ℹ️ Min Buy", "min_buy", "✏️ (0)"),
+            ("ℹ️ Link", "link", "✏️ ()"),
+            ("ℹ️ Emoji", "emoji", "✏️ (🟢)"),
+            ("ℹ️ Media", "media", "✏️ (📸)"),
+        ]
+        for left, key, right in rows:
+            kb.button(text=left, callback_data=f"editset:{mint}:{key}")
+            kb.button(text=right, callback_data=f"editset:{mint}:{key}")
+        kb.adjust(3, 2, 2, 2, 2, 2)
+    elif page == 2:
+        for label, key in [
+            ("🟢 Show Media", "show_media"),
+            ("🟢 Show Mcap", "show_mcap"),
+            ("🟢 Show Price", "show_price"),
+            ("🟢 Show Holders", "show_holders"),
+            ("🟢 Show DEX", "show_dex"),
+            ("🧨 Delete Token", "delete"),
+        ]:
+            kb.button(text=label, callback_data=f"editset:{mint}:{key}")
+        kb.adjust(3, 1, 1, 1, 1, 1, 1)
+    else:
+        kb.button(text="— CHART —", callback_data="noop")
+        kb.button(text="✅ DexS", callback_data=f"editset:{mint}:chart:DexS")
+        kb.button(text="DexT", callback_data=f"editset:{mint}:chart:DexT")
+        kb.button(text="GeC", callback_data=f"editset:{mint}:chart:GeC")
+        kb.button(text="— BUYBOT LANGUAGE —", callback_data="noop")
+        kb.button(text="🇺🇸 English ✅", callback_data=f"editset:{mint}:lang:English")
+        kb.button(text="🇷🇺 Russian", callback_data=f"editset:{mint}:lang:Russian")
+        kb.button(text="🇨🇳 Chinese", callback_data=f"editset:{mint}:lang:Chinese")
+        kb.adjust(3, 1, 3, 1, 2, 1)
     kb.button(text="« Return", callback_data="menu:home")
-    kb.adjust(2, 1)
+    kb.adjust(3)
     return kb.as_markup()
 
 
@@ -62,8 +96,7 @@ def trending_package_kb(selected: str | None = None) -> InlineKeyboardMarkup:
     plans = [("1h", "1 Hours"), ("3h", "3 Hours"), ("6h", "6 Hours"), ("9h", "9 Hours"), ("12h", "12 Hours"), ("24h", "24 Hours")]
     kb = InlineKeyboardBuilder()
     for key, label in plans:
-        prefix = "✅ " if selected == key else "☑️ "
-        kb.button(text=prefix + label, callback_data=f"trendpkg:{key}")
+        kb.button(text=("✅ " if selected == key else "☑️ ") + label, callback_data=f"trendpkg:{key}")
     kb.button(text="Continue →", callback_data="trendpkg:continue")
     kb.button(text="« Return", callback_data="menu:home")
     kb.adjust(2, 2, 2, 1, 1)

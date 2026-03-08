@@ -16,7 +16,7 @@ from bot.keyboards import (
     advert_duration_kb,
     invoice_kb,
     lang_kb,
-    token_action_kb,
+    token_edit_page_kb,
 )
 from services.payment_verifier import find_recent_payment
 from services.ads_service import AdsService
@@ -31,7 +31,6 @@ MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 class TrendingFlow(StatesGroup):
     package = State()
     link = State()
-    emoji = State()
 
 
 class AdvertFlow(StatesGroup):
@@ -184,6 +183,26 @@ async def _upsert_tracked_token(db: DB, mint: str, telegram_link: str | None = N
     return meta
 
 
+async def _ensure_token_settings(db: DB, mint: str):
+    conn = await db.connect()
+    await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
+    await conn.commit()
+    await conn.close()
+
+
+async def _token_label(db: DB, mint: str) -> str:
+    conn = await db.connect()
+    cur = await conn.execute("SELECT COALESCE(name, symbol, mint) FROM tracked_tokens WHERE mint=?", (mint,))
+    row = await cur.fetchone()
+    await conn.close()
+    return row[0] if row else mint[:6]
+
+
+async def _render_edit_page(db: DB, mint: str, page: int) -> str:
+    label = await _token_label(db, mint)
+    return f"Customize your Token\n\n<code>{mint}</code>\n\nName: <b>{label}</b>"
+
+
 async def _group_status_text(db: DB, group_id: int) -> str:
     conn = await db.connect()
     cur = await conn.execute("SELECT * FROM group_settings WHERE group_id=?", (group_id,))
@@ -247,6 +266,7 @@ async def add_token_mint(msg: Message, state: FSMContext, db: DB):
     if not MINT_RE.match(mint):
         return await msg.reply("Send a valid Solana token mint.")
     meta = await _upsert_tracked_token(db, mint)
+    await _ensure_token_settings(db, mint)
     await state.update_data(token_mint=mint, token_label=meta.get("symbol") or meta.get("name") or mint[:6])
     if msg.chat.type in ("group", "supergroup"):
         conn = await db.connect()
@@ -264,7 +284,7 @@ async def add_token_mint(msg: Message, state: FSMContext, db: DB):
         )
     await state.set_state(AddTokenFlow.tg)
     await msg.answer(
-        f"Token Details\nName: <b>{meta.get('name') or meta.get('symbol') or mint[:6]}</b>\nSymbol: <b>{meta.get('symbol') or '—'}</b>\n\nSend token Telegram link or type <code>skip</code>.",
+        f"Token Details\nName: <b>{meta.get('name') or meta.get('symbol') or mint[:6]}</b>\nSymbol: <b>{meta.get('symbol') or '—'}</b>\n\nIs this correct? Send token Telegram link or type <code>skip</code>.",
         parse_mode="HTML",
     )
 
@@ -304,7 +324,7 @@ async def view_token(cq: CallbackQuery, db: DB):
     await cq.message.answer(
         f"Token Details\nName: <b>{row['name'] or row['symbol'] or mint[:6]}</b>\nSymbol: <b>{row['symbol'] or '—'}</b>\nMint: <code>{mint}</code>\nTelegram: {row['telegram_link'] or '—'}",
         parse_mode="HTML",
-        reply_markup=token_action_kb(mint),
+        reply_markup=token_edit_page_kb(mint, 1),
     )
     await cq.answer()
 
@@ -315,16 +335,39 @@ async def menu_edit(cq: CallbackQuery, db: DB):
     if not tokens:
         await cq.message.answer("No tracked tokens yet.")
     else:
-        await cq.message.answer("✏️ Select the token you want to edit.", reply_markup=token_list_kb(tokens, "edittoken", back="menu:home"))
+        await cq.message.answer("Hi, please select your token below.", reply_markup=token_list_kb(tokens, "edittoken", back="menu:home"))
     await cq.answer()
 
 
 @router.callback_query(F.data.startswith("edittoken:"))
-async def edit_token(cq: CallbackQuery, state: FSMContext):
+async def edit_token(cq: CallbackQuery, state: FSMContext, db: DB):
     mint = cq.data.split(":", 1)[1]
-    await state.set_state(EditTokenFlow.tg)
-    await state.update_data(edit_mint=mint)
-    await cq.message.answer("⬇️ Send the new Telegram link for this token, or type skip to keep the current one.")
+    await _ensure_token_settings(db, mint)
+    await state.clear()
+    await cq.message.answer(await _render_edit_page(db, mint, 1), parse_mode="HTML", reply_markup=token_edit_page_kb(mint, 1))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("editpage:"))
+async def edit_page(cq: CallbackQuery, db: DB):
+    _, mint, page = cq.data.split(":", 2)
+    page = int(page)
+    await cq.message.answer(await _render_edit_page(db, mint, page), parse_mode="HTML", reply_markup=token_edit_page_kb(mint, page))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("editset:"))
+async def edit_set(cq: CallbackQuery, state: FSMContext):
+    parts = cq.data.split(":")
+    mint = parts[1]
+    key = parts[2]
+    if key == "delete":
+        await cq.message.answer("Use /disabletoken <mint> if you want to disable this token.")
+    elif key in {"buy_step","min_buy","link","emoji","media"}:
+        await state.set_state(EditTokenFlow.tg)
+        await state.update_data(edit_mint=mint, edit_key=key)
+        prompts={"buy_step":"Send buy step number.","min_buy":"Send minimum buy in SOL.","link":"Send Telegram link.","emoji":"Send emoji.","media":"Send a photo to use as media or type skip."}
+        await cq.message.answer(prompts[key])
     await cq.answer()
 
 
@@ -332,14 +375,29 @@ async def edit_token(cq: CallbackQuery, state: FSMContext):
 async def edit_token_tg(msg: Message, state: FSMContext, db: DB):
     data = await state.get_data()
     mint = data["edit_mint"]
-    tg = _norm_tg(msg.text)
-    if tg:
-        conn = await db.connect()
-        await conn.execute("UPDATE tracked_tokens SET telegram_link=? WHERE mint=?", (tg, mint))
-        await conn.commit()
-        await conn.close()
+    key = data.get("edit_key", "link")
+    conn = await db.connect()
+    if key == "link":
+        tg = _norm_tg(msg.text)
+        if tg:
+            await conn.execute("UPDATE tracked_tokens SET telegram_link=? WHERE mint=?", (tg, mint))
+    elif key == "buy_step":
+        await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
+        await conn.execute("UPDATE token_settings SET buy_step=? WHERE mint=?", (int(float(msg.text or '1')), mint))
+    elif key == "min_buy":
+        await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
+        await conn.execute("UPDATE token_settings SET min_buy=? WHERE mint=?", (float(msg.text or '0'), mint))
+    elif key == "emoji":
+        await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
+        await conn.execute("UPDATE token_settings SET emoji=? WHERE mint=?", ((msg.text or '🟢')[:8], mint))
+    elif key == "media":
+        fid = msg.photo[-1].file_id if msg.photo else None
+        await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
+        await conn.execute("UPDATE token_settings SET media_file_id=? WHERE mint=?", (fid, mint))
+    await conn.commit()
+    await conn.close()
     await state.clear()
-    await msg.answer("✅ Token updated.", reply_markup=main_menu_kb())
+    await msg.answer("✅ Token updated.", reply_markup=token_edit_page_kb(mint, 1))
 
 
 @router.callback_query(F.data == "menu:group")
@@ -433,7 +491,7 @@ async def trending_pick_token(cq: CallbackQuery, state: FSMContext):
     await state.update_data(token_mint=mint, token_label=token_label, package="1h")
     price = TREND_PRICES["1h"][0]
     await cq.message.answer(
-        f"📊 Almost done. Choose your Trending package, then provide a link and (optionally) a custom emoji.\n"
+        f"📊 Almost done. Choose your Trending package, then provide a link.\n"
         f"Token: {token_label}\nDuration: 1 Hours\nPrice: {price:g} SOL\nLink: —",
         reply_markup=trending_package_kb("1h"),
     )
@@ -448,7 +506,7 @@ async def trending_package(cq: CallbackQuery, state: FSMContext, db: DB, rpc: So
         await state.update_data(package=action)
         price, _, label = TREND_PRICES[action]
         await cq.message.answer(
-            f"📊 Almost done. Choose your Trending package, then provide a link and (optionally) a custom emoji.\n"
+            f"📊 Almost done. Choose your Trending package, then provide a link.\n"
             f"Token: {data.get('token_label', 'Token')}\nDuration: {label}\nPrice: {price:g} SOL\nLink: {data.get('link') or '—'}",
             reply_markup=trending_package_kb(action),
         )
@@ -487,7 +545,7 @@ async def trending_emoji(msg: Message, state: FSMContext):
     price, _, label = TREND_PRICES[package]
     await state.set_state(TrendingFlow.package)
     await msg.answer(
-        f"📊 Almost done. Choose your Trending package, then provide a link and (optionally) a custom emoji.\n"
+        f"📊 Almost done. Choose your Trending package, then provide a link.\n"
         f"Token: {data.get('token_label', 'Token')}\nDuration: {label}\nPrice: {price:g} SOL\nLink: {data.get('link') or '—'}",
         reply_markup=trending_package_kb(package),
     )
