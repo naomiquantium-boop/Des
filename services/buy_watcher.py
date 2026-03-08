@@ -118,8 +118,7 @@ class BuyWatcher:
         buyer = ev.get("buyer") or "Unknown"
         spent_usd = (float(meta.get("priceUsd")) * got_tokens) if meta.get("priceUsd") is not None and got_tokens else (spent_sol * sol_price if sol_price and spent_sol else 0.0)
 
-        # Global min-buy filter for BOTH group + channel.
-        # Any event below this is ignored (reduces spam and blocks sells that come through as 0.00 SOL).
+        # Global default min-buy filter. Token-level min_buy can raise it further below.
         if spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
             return
         now_ts = int(time.time())
@@ -136,6 +135,7 @@ class BuyWatcher:
 
         tx_url = TX_URL.format(sig=ev["signature"])
         tg_url = None
+        token_cfg = {"buy_step": 1, "min_buy": 0.0, "emoji": "🟢", "media_file_id": None}
         # pick a default Telegram link for this token from any active group config
         try:
             for _r in tgt.get("groups", []):
@@ -145,14 +145,18 @@ class BuyWatcher:
         except Exception:
             tg_url = None
 
-        # prefer owner-set telegram link for tracked tokens
+        # prefer owner-set telegram link for tracked tokens, and load token settings
         try:
             conn_tg = await self.db.connect()
             cur2 = await conn_tg.execute("SELECT telegram_link FROM tracked_tokens WHERE mint=?", (mint,))
             row2 = await cur2.fetchone()
+            cur3 = await conn_tg.execute("SELECT buy_step, min_buy, emoji, media_file_id FROM token_settings WHERE mint=?", (mint,))
+            row3 = await cur3.fetchone()
             await conn_tg.close()
             if row2 and row2[0]:
                 tg_url = row2[0]
+            if row3:
+                token_cfg = {"buy_step": row3[0] or 1, "min_buy": float(row3[1] or 0.0), "emoji": row3[2] or "🟢", "media_file_id": row3[3]}
         except Exception:
             pass
         # group message uses group settings emoji and tg link (if set)
@@ -169,6 +173,7 @@ class BuyWatcher:
             tg_url=tg_url,
             ad_text=ad_text,
             ad_link=ad_link,
+            chart_url=meta.get("dexUrl"),
         )
 
         msg_text_channel = build_buy_message_channel(
@@ -184,17 +189,18 @@ class BuyWatcher:
             tg_url=tg_url,
             ad_text=ad_text,
             ad_link=ad_link,
+            chart_url=meta.get("dexUrl"),
         )
 
 
         # send to groups (respect group settings, but never below global min)
         for r in tgt["groups"]:
-            min_buy = max(float(settings.MIN_BUY_DEFAULT_SOL), float(r["min_buy_sol"]))
+            min_buy = max(float(settings.MIN_BUY_DEFAULT_SOL), float(r["min_buy_sol"] or 0), float(token_cfg.get("min_buy") or 0))
             if spent_sol is None or spent_sol < min_buy:
                 continue
-            emoji = r["emoji"]
-            tg = r["telegram_link"] or None
-            media = r["media_file_id"]
+            emoji = token_cfg.get("emoji") or r["emoji"] or "🟢"
+            tg = tg_url or r["telegram_link"] or None
+            media = token_cfg.get("media_file_id") or r["media_file_id"]
             chat_id = int(r["group_id"])
             ctype = await self._chat_type(chat_id)
 
@@ -214,6 +220,7 @@ class BuyWatcher:
                     tg_url=tg,
                     ad_text=ad_text,
                     ad_link=ad_link,
+                    chart_url=meta.get("dexUrl"),
                 )
                 try:
                     await self.bot.send_message(
@@ -241,6 +248,7 @@ class BuyWatcher:
                 tg_url=tg,
                 ad_text=ad_text,
                 ad_link=ad_link,
+                chart_url=meta.get("dexUrl"),
             )
 
             try:
