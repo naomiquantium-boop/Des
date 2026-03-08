@@ -35,6 +35,9 @@ class AddTokenFlow(StatesGroup):
 class EditTokenFlow(StatesGroup):
     value = State()
 
+class InvoiceFlow(StatesGroup):
+    txhash = State()
+
 TREND_PRICES = {
     "1h": (settings.TRENDING_1H_PRICE_SOL, 3600, "1 Hours"),
     "3h": (settings.TRENDING_3H_PRICE_SOL, 3 * 3600, "3 Hours"),
@@ -139,6 +142,23 @@ async def _used_signatures(db: DB) -> set[str]:
     rows = await cur.fetchall()
     await conn.close()
     return {r[0] for r in rows if r[0]}
+
+async def _check_invoice_payment(db: DB, rpc: SolanaRPC, invoice_id: int):
+    conn = await db.connect()
+    cur = await conn.execute("SELECT status, amount_sol FROM invoices WHERE id=?", (invoice_id,))
+    inv = await cur.fetchone()
+    await conn.close()
+    if not inv:
+        return (False, "Invoice not found.")
+    if inv["status"] == "paid":
+        return (True, "Already paid.")
+    used = await _used_signatures(db)
+    res = await find_recent_payment(rpc, settings.PAYMENT_WALLET, float(inv["amount_sol"]), used)
+    if not res.ok or not res.signature:
+        return (False, "Payment not detected yet.")
+    if await _activate_invoice(db, invoice_id, res.signature, res.amount_sol):
+        return (True, "✅ Payment verified and campaign activated.")
+    return (True, "Already paid.")
 
 async def _activate_invoice(db: DB, invoice_id: int, sig: str, amount_sol: float):
     conn = await db.connect()
@@ -525,21 +545,62 @@ async def trending_package_text(msg: Message, state: FSMContext, db: DB, rpc: So
     await msg.answer(text, reply_markup=invoice_kb(invoice_id, amount), disable_web_page_preview=True)
     await state.clear(); asyncio.create_task(_watch_invoice(msg.bot, db, rpc, msg.chat.id, invoice_id))
 
+@router.callback_query(F.data.startswith("invoice:paid:"))
+async def invoice_paid(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
+    invoice_id = int(cq.data.rsplit(':', 1)[1])
+    ok, message = await _check_invoice_payment(db, rpc, invoice_id)
+    if ok and message.startswith("✅"):
+        await cq.message.answer(message)
+        return await cq.answer("Verified")
+    await cq.answer(message, show_alert=True)
+
+@router.callback_query(F.data.startswith("invoice:txhash:"))
+async def invoice_txhash_prompt(cq: CallbackQuery, state: FSMContext):
+    invoice_id = int(cq.data.rsplit(':', 1)[1])
+    await state.clear()
+    await state.set_state(InvoiceFlow.txhash)
+    await state.update_data(invoice_id=invoice_id)
+    await cq.message.answer("Send your transaction hash.")
+    await cq.answer()
+
+@router.message(InvoiceFlow.txhash)
+async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
+    invoice_id = (await state.get_data()).get("invoice_id")
+    sig = (msg.text or "").strip()
+    if not invoice_id or len(sig) < 20:
+        return await msg.answer("Send a valid transaction hash.")
+    conn = await db.connect()
+    cur = await conn.execute("SELECT status, amount_sol FROM invoices WHERE id=?", (invoice_id,))
+    inv = await cur.fetchone()
+    await conn.close()
+    if not inv:
+        await state.clear()
+        return await msg.answer("Invoice not found.")
+    if inv["status"] == "paid":
+        await state.clear()
+        return await msg.answer("✅ Already paid.")
+    used = await _used_signatures(db)
+    if sig in used:
+        await state.clear()
+        return await msg.answer("This transaction hash was already used.")
+    from services.payment_verifier import verify_sol_transfer
+    res = await verify_sol_transfer(rpc, sig, settings.PAYMENT_WALLET, float(inv["amount_sol"]))
+    if not res.ok or not res.signature:
+        return await msg.answer(res.reason)
+    if await _activate_invoice(db, int(invoice_id), res.signature, res.amount_sol):
+        await msg.answer("✅ Payment verified and campaign activated.")
+    else:
+        await msg.answer("✅ Already paid.")
+    await state.clear()
+
 @router.callback_query(F.data.startswith("invoice:refresh:"))
 async def invoice_refresh(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
     invoice_id = int(cq.data.rsplit(':', 1)[1])
-    conn = await db.connect(); cur = await conn.execute("SELECT status, amount_sol FROM invoices WHERE id=?", (invoice_id,)); inv = await cur.fetchone(); await conn.close()
-    if not inv:
-        return await cq.answer('Invoice not found.', show_alert=True)
-    if inv['status'] == 'paid':
-        return await cq.answer('Already paid.', show_alert=True)
-    used = await _used_signatures(db)
-    res = await find_recent_payment(rpc, settings.PAYMENT_WALLET, float(inv['amount_sol']), used)
-    if not res.ok or not res.signature:
-        return await cq.answer('Payment not detected yet.', show_alert=True)
-    if await _activate_invoice(db, invoice_id, res.signature, res.amount_sol):
-        await cq.message.answer('✅ Payment verified and campaign activated.')
-    await cq.answer()
+    ok, message = await _check_invoice_payment(db, rpc, invoice_id)
+    if ok and message.startswith("✅"):
+        await cq.message.answer(message)
+        return await cq.answer("Verified")
+    await cq.answer(message, show_alert=True)
 
 @router.message(Command("tokens"))
 async def tokens_cmd(msg: Message, db: DB):
