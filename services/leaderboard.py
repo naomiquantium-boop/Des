@@ -1,10 +1,12 @@
 from __future__ import annotations
 import asyncio, time
-from aiogram.exceptions import TelegramBadRequest
+import aiosqlite
+from typing import List, Tuple
 from bot.config import settings
-from bot.keyboards import leaderboard_kb
 from services.token_meta import fetch_token_meta
 from utils.formatter import build_leaderboard_message
+from bot.keyboards import leaderboard_kb
+from aiogram.exceptions import TelegramBadRequest
 
 
 class LeaderboardUpdater:
@@ -13,13 +15,16 @@ class LeaderboardUpdater:
         self.db = db
         self._running = False
 
-    async def _get_kv(self, conn, key: str):
+    async def _get_kv(self, conn: aiosqlite.Connection, key: str) -> str | None:
         cur = await conn.execute("SELECT v FROM state_kv WHERE k=?", (key,))
         row = await cur.fetchone()
-        return row[0] if row else None
+        return row["v"] if row else None
 
-    async def _set_kv(self, conn, key: str, val: str):
-        await conn.execute("INSERT INTO state_kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, val))
+    async def _set_kv(self, conn: aiosqlite.Connection, key: str, val: str):
+        await conn.execute(
+            "INSERT INTO state_kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (key, val),
+        )
         await conn.commit()
 
     async def run_forever(self):
@@ -29,7 +34,7 @@ class LeaderboardUpdater:
                 await self.tick()
             except Exception:
                 pass
-            await asyncio.sleep(settings.LEADERBOARD_INTERVAL_SEC)
+            await asyncio.sleep(30)
 
     async def tick(self):
         if not settings.POST_CHANNEL:
@@ -38,37 +43,42 @@ class LeaderboardUpdater:
         now = int(time.time())
         since = now - 24 * 3600
         cur = await conn.execute(
-            "SELECT mint, SUM(usd) as vol FROM buys WHERE ts>=? GROUP BY mint ORDER BY vol DESC LIMIT 20",
+            "SELECT mint, SUM(usd) AS vol FROM buys WHERE ts>=? GROUP BY mint ORDER BY vol DESC LIMIT 25",
             (since,),
         )
         buy_rows = await cur.fetchall()
-        cur = await conn.execute("SELECT mint, manual_rank, manual_boost, force_leaderboard FROM tracked_tokens WHERE is_active=1 ORDER BY created_at DESC")
-        tracked = await cur.fetchall()
-        items: dict[str, dict] = {}
-        for r in buy_rows:
-            items[r["mint"]] = {"mint": r["mint"], "score": float(r["vol"] or 0), "manual_rank": None, "force": 0}
-        for r in tracked:
-            item = items.setdefault(r["mint"], {"mint": r["mint"], "score": 0.0, "manual_rank": r["manual_rank"], "force": r["force_leaderboard"]})
-            item["score"] += float(r["manual_boost"] or 0)
-            item["manual_rank"] = r["manual_rank"]
-            item["force"] = r["force_leaderboard"]
+        forced_cur = await conn.execute(
+            "SELECT mint, COALESCE(symbol, name, mint) AS label, force_trending, force_leaderboard, manual_rank, trend_until_ts FROM tracked_tokens ORDER BY created_at DESC"
+        )
+        tracked = await forced_cur.fetchall()
 
-        ranked = sorted(items.values(), key=lambda x: ((x["manual_rank"] is None), x["manual_rank"] or 9999, -x["force"], -x["score"]))[:10]
-        rows = []
-        rank = 1
-        for item in ranked:
-            meta = await fetch_token_meta(item["mint"])
-            rows.append({
-                "rank": rank,
-                "symbol": (meta.get("symbol") or meta.get("name") or item["mint"][:6]).replace("$", ""),
-                "mcap": meta.get("mcapUsd") or item["score"],
-                "pct": 0.0,
-            })
-            rank += 1
+        metrics: dict[str, float] = {r['mint']: float(r['vol'] or 0) for r in buy_rows}
+        labels: dict[str, str] = {}
+        for row in tracked:
+            labels[row['mint']] = row['label']
+            if row['force_trending'] or row['force_leaderboard'] or (row['trend_until_ts'] or 0) > now:
+                metrics[row['mint']] = max(metrics.get(row['mint'], 0.0), 1.0)
+
+        for mint in list(metrics.keys()):
+            if mint not in labels:
+                try:
+                    meta = await fetch_token_meta(mint)
+                    labels[mint] = meta.get('symbol') or meta.get('name') or mint[:6]
+                except Exception:
+                    labels[mint] = mint[:6]
+
+        ordered = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        rows: List[Tuple[int, str, str, float]] = []
+        for rank, (mint, vol) in enumerate(ordered, start=1):
+            pct = await self._pct_change_24h(conn, mint, now)
+            metric = self._compact_metric(vol)
+            rows.append((rank, labels.get(mint, mint[:6]), metric, pct))
         while len(rows) < 10:
-            rows.append({"rank": len(rows) + 1, "symbol": "TOKEN", "mcap": 0, "pct": 0.0})
+            n = len(rows) + 1
+            rows.append((n, "TOKEN", "0", 0.0))
 
-        text = build_leaderboard_message(rows)
+        footer_handle = f"@{settings.BOT_USERNAME}"
+        text = build_leaderboard_message(rows, footer_handle)
         mid = await self._get_kv(conn, "leaderboard_message_id")
         if not mid:
             msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
@@ -77,10 +87,36 @@ class LeaderboardUpdater:
             try:
                 await self.bot.edit_message_text(text=text, chat_id=settings.POST_CHANNEL, message_id=int(mid), reply_markup=leaderboard_kb(), disable_web_page_preview=True)
             except TelegramBadRequest as e:
-                if "message is not modified" not in str(e).lower():
-                    msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
-                    await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
+                if "message is not modified" in str(e).lower():
+                    await conn.close()
+                    return
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
+            except Exception:
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
         await conn.close()
+
+    def _compact_metric(self, x: float) -> str:
+        if x >= 1_000_000:
+            return f"{x/1_000_000:.0f}M"
+        if x >= 1_000:
+            return f"{x/1_000:.0f}K"
+        return f"{x:.0f}"
+
+    async def _pct_change_24h(self, conn: aiosqlite.Connection, mint: str, now: int) -> float:
+        since = now - 24 * 3600
+        cur = await conn.execute("SELECT price_usd, ts FROM price_snapshots WHERE mint=? AND ts>=? ORDER BY ts ASC LIMIT 1", (mint, since))
+        first = await cur.fetchone()
+        cur = await conn.execute("SELECT price_usd, ts FROM price_snapshots WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,))
+        last = await cur.fetchone()
+        if not first or not last:
+            return 0.0
+        p0 = float(first['price_usd'] or 0.0)
+        p1 = float(last['price_usd'] or 0.0)
+        if p0 <= 0:
+            return 0.0
+        return ((p1 - p0) / p0) * 100.0
 
     async def close(self):
         self._running = False

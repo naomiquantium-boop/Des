@@ -1,8 +1,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 import time
 from utils.solana_rpc import SolanaRPC
+
 
 @dataclass
 class PaymentResult:
@@ -11,9 +12,12 @@ class PaymentResult:
     amount_sol: float = 0.0
     slot: Optional[int] = None
     timestamp: Optional[int] = None
+    signature: Optional[str] = None
+
 
 def _lamports_to_sol(lamports: int) -> float:
     return lamports / 1_000_000_000
+
 
 async def verify_sol_transfer(
     rpc: SolanaRPC,
@@ -33,8 +37,6 @@ async def verify_sol_transfer(
         return PaymentResult(False, "Transaction failed on-chain.")
     message = (tx.get("transaction") or {}).get("message") or {}
     instructions = message.get("instructions") or []
-    # Look for system transfer to expected_to
-    found = False
     amount_sol = 0.0
     for ix in instructions:
         parsed = ix.get("parsed")
@@ -46,8 +48,26 @@ async def verify_sol_transfer(
             if dest == expected_to:
                 amount_sol = _lamports_to_sol(lamports)
                 if amount_sol + 1e-9 >= min_amount_sol:
-                    found = True
-                    break
-    if not found:
-        return PaymentResult(False, f"Payment not found. Send at least {min_amount_sol} SOL to {expected_to}.", amount_sol=amount_sol, timestamp=block_time)
-    return PaymentResult(True, "Payment verified.", amount_sol=amount_sol, timestamp=block_time)
+                    return PaymentResult(True, "Payment verified.", amount_sol=amount_sol, timestamp=block_time, signature=signature)
+    return PaymentResult(False, f"Payment not found. Send at least {min_amount_sol} SOL to {expected_to}.", amount_sol=amount_sol, timestamp=block_time)
+
+
+async def find_recent_payment(
+    rpc: SolanaRPC,
+    expected_to: str,
+    min_amount_sol: float,
+    used_signatures: set[str] | None = None,
+) -> PaymentResult:
+    used_signatures = used_signatures or set()
+    try:
+        sigs = await rpc.get_signatures_for_address(expected_to, limit=20)
+    except Exception:
+        return PaymentResult(False, "Could not fetch wallet payments right now.")
+    for item in sigs:
+        sig = item.get("signature")
+        if not sig or sig in used_signatures:
+            continue
+        res = await verify_sol_transfer(rpc, sig, expected_to, min_amount_sol)
+        if res.ok:
+            return res
+    return PaymentResult(False, "Payment not detected yet.")
