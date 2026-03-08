@@ -1,7 +1,11 @@
 from __future__ import annotations
-from html import escape
-from typing import Optional
 from bot.config import settings
+from typing import Optional
+
+RANK_EMOJIS = {
+    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣",
+    6: "6️⃣", 7: "7️⃣", 8: "8️⃣", 9: "9️⃣", 10: "🔟",
+}
 
 
 def short_addr(a: str, left: int = 4, right: int = 4) -> str:
@@ -12,35 +16,15 @@ def short_addr(a: str, left: int = 4, right: int = 4) -> str:
     return f"{a[:left]}...{a[-right:]}"
 
 
-def fmt_num(x: float | int | None, decimals: int = 2) -> str:
-    if x is None:
-        return "0"
+def emoji_bar(emoji: str, count: int = 3) -> str:
+    return " ".join([emoji] * max(1, count))
+
+
+def fmt_num(x: float, decimals: int = 2) -> str:
     try:
-        return f"{float(x):,.{decimals}f}"
+        return f"{x:,.{decimals}f}"
     except Exception:
         return str(x)
-
-
-def compact_num(value: float | int | None) -> str:
-    if value is None:
-        return "0"
-    x = float(value)
-    for suffix, div in (("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)):
-        if abs(x) >= div:
-            out = x / div
-            if out >= 100:
-                return f"{out:.0f}{suffix}"
-            if out >= 10:
-                return f"{out:.1f}{suffix}".replace('.0', '')
-            return f"{out:.2f}{suffix}".replace('.00', '').replace('.0', '')
-    return f"{x:.0f}" if x >= 100 else f"{x:.2f}".replace('.00', '').replace('.0', '')
-
-
-def emoji_bar(emoji: str, spent_usd: float = 0.0, base: int = 4) -> str:
-    count = base
-    if spent_usd > 0:
-        count = max(base, min(12, int(spent_usd // 10) + 1))
-    return " ".join([emoji] * count)
 
 
 def _norm_url(url: Optional[str]) -> Optional[str]:
@@ -60,20 +44,25 @@ def _norm_url(url: Optional[str]) -> Optional[str]:
 
 def _a(label: str, url: Optional[str]) -> str:
     u = _norm_url(url)
-    text = escape(label)
     if not u:
-        return text
-    return f'<a href="{escape(u)}">{text}</a>'
+        return label
+    return f'<a href="{u}">{label}</a>'
 
 
-def ad_line(text: str | None, link: str | None = None) -> str:
-    safe = text.strip() if text else settings.DEFAULT_AD_TEXT
-    return f"ad: {_a(safe, link or settings.BOOK_ADS_URL)}"
+def _default_ad_line() -> str:
+    return f'ad: <a href="{settings.BOOK_ADS_URL}">Promote here with Pumptools Ads</a>'
+
+
+def _ad_line(ad_text: str | None, ad_link: str | None = None) -> str:
+    if ad_text and ad_text.strip():
+        if ad_link:
+            return f'ad: <a href="{_norm_url(ad_link)}">{ad_text}</a>'
+        return f"ad: {ad_text}"
+    return _default_ad_line()
 
 
 def build_buy_message_group(
-    token_name: str,
-    dex_name: str,
+    token_symbol: str,
     emoji: str,
     spent_sol: float,
     spent_usd: float,
@@ -82,28 +71,30 @@ def build_buy_message_group(
     tx_url: str,
     price_usd: Optional[float],
     mcap_usd: Optional[float],
-    listing_url: Optional[str],
-    chart_url: Optional[str],
+    tg_url: Optional[str],
     ad_text: Optional[str],
     ad_link: Optional[str],
 ) -> str:
-    lines = [f"🪐 {escape(token_name)} Buy! —", escape(dex_name), "", emoji_bar(emoji, spent_usd), ""]
-    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL (${fmt_num(spent_usd, 2)})")
-    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {escape(token_name.split()[0][:12].upper())}")
+    title = f'🪐 {_a(token_symbol, tg_url)} Buy! —\nSolana'
+    count = max(3, min(12, int(spent_sol * 4) or 3))
+    usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
+    lines = [title, "", emoji_bar(emoji, count), ""]
+    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL{usd_part}")
+    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {token_symbol}")
     lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
     if price_usd is not None:
         lines.append(f"🏷 Price: ${fmt_num(price_usd, 6)}")
     if mcap_usd is not None:
         lines.append(f"📊 MarketCap: ${fmt_num(mcap_usd, 0)}")
     lines.append("")
-    lines.append(f"🤍 {_a('Listing', listing_url)} | 📈 {_a('Chart', chart_url)}")
+    lines.append(f'🤍 {_a("Listing", settings.LISTING_URL)} | 📈 {_a("Chart", tx_url)}')
     lines.append("")
-    lines.append(ad_line(ad_text, ad_link))
+    lines.append(_ad_line(ad_text, ad_link))
     return "\n".join(lines)
 
 
 def build_buy_message_channel(
-    token_name: str,
+    token_symbol: str,
     emoji: str,
     spent_sol: float,
     spent_usd: float,
@@ -112,44 +103,34 @@ def build_buy_message_channel(
     tx_url: str,
     price_usd: Optional[float],
     mcap_usd: Optional[float],
-    listing_url: Optional[str],
-    chart_url: Optional[str],
+    tg_url: Optional[str],
     ad_text: Optional[str],
     ad_link: Optional[str],
-    rank_text: Optional[str] = None,
 ) -> str:
-    lines = [f"🪐 {_a(token_name, listing_url)} Buy!", "", emoji_bar(emoji, spent_usd, base=5), ""]
-    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL (${fmt_num(spent_usd, 2)})")
-    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {escape(token_name.split()[0][:12].upper())}")
+    title = f'🪐 {_a(token_symbol, tg_url)} Buy!'
+    count = max(3, min(18, int(spent_sol * 10) or 3))
+    usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
+    lines = [title, "", emoji_bar(emoji, count), ""]
+    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL{usd_part}")
+    lines.append(f"🔁 {fmt_num(got_tokens, 2)} {token_symbol}")
     lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
     if price_usd is not None:
         lines.append(f"🏷 Price: ${fmt_num(price_usd, 6)}")
     if mcap_usd is not None:
         lines.append(f"📊 MarketCap: ${fmt_num(mcap_usd, 0)}")
     lines.append("")
-    lines.append(f"🤍 {_a('Listing', listing_url)} | 📈 {_a('Chart', chart_url)}")
-    if rank_text:
-        lines.append("")
-        lines.append(f"🔥 {escape(rank_text)}")
+    lines.append(f'🤍 {_a("Listing", settings.LISTING_URL)} | 📈 {_a("Chart", tx_url)}')
     lines.append("")
-    lines.append(ad_line(ad_text, ad_link))
+    lines.append(_ad_line(ad_text, ad_link))
     return "\n".join(lines)
 
 
-def build_leaderboard_message(rows: list[dict]) -> str:
+def build_leaderboard_message(rows: list[tuple[int, str, str, float]], footer_handle: str) -> str:
     lines = ["🟢 PUMPTOOLS TRENDING", ""]
-    for item in rows[:10]:
-        rank = item["rank"]
-        sym = escape(item["symbol"])
-        mcap = compact_num(item.get("mcap") or 0)
-        pct = item.get("pct") or 0
-        medal = ""
-        if rank == 1:
-            medal = "🥇 "
-        elif rank == 2:
-            medal = "🥈 "
-        elif rank == 3:
-            medal = "🥉 "
-        lines.append(f"{medal}{rank} {sym} | {mcap} | {pct:.0f}%")
-    lines += ["", f"💬 {escape(settings.LEADERBOARD_FOOTER)}"]
+    for rank, label, metric, pct in rows[:10]:
+        sign = "+" if pct > 0 else ""
+        rank_icon = RANK_EMOJIS.get(rank, str(rank))
+        lines.append(f"{rank_icon} <a href=\"{settings.LISTING_URL}\">{label}</a> | {metric} | {sign}{pct:.0f}%")
+    lines.append("")
+    lines.append(f"<blockquote>💬 To trend add {footer_handle} in your group</blockquote>")
     return "\n".join(lines)
