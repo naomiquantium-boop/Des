@@ -49,46 +49,22 @@ def token_list_kb(tokens: list[tuple[str, str]], prefix: str, back: str = "menu:
     return kb.as_markup()
 
 
-def token_edit_page_kb(mint: str, page: int) -> InlineKeyboardMarkup:
+def token_edit_page_kb(mint: str, page: int, values: dict | None = None) -> InlineKeyboardMarkup:
+    values = values or {}
     kb = InlineKeyboardBuilder()
-    for p in (1, 2, 3):
-        kb.button(text=("✅ " if p == page else "☑️ ") + f"Page {p}", callback_data=f"editpage:{mint}:{p}")
-    kb.adjust(3)
-    if page == 1:
-        rows = [
-            ("ℹ️ Buy Step", "buy_step", "✏️ (1)"),
-            ("ℹ️ Min Buy", "min_buy", "✏️ (0)"),
-            ("ℹ️ Link", "link", "✏️ ()"),
-            ("ℹ️ Emoji", "emoji", "✏️ (🟢)"),
-            ("ℹ️ Media", "media", "✏️ (📸)"),
-        ]
-        for left, key, right in rows:
-            kb.button(text=left, callback_data=f"editset:{mint}:{key}")
-            kb.button(text=right, callback_data=f"editset:{mint}:{key}")
-        kb.adjust(3, 2, 2, 2, 2, 2)
-    elif page == 2:
-        for label, key in [
-            ("🟢 Show Media", "show_media"),
-            ("🟢 Show Mcap", "show_mcap"),
-            ("🟢 Show Price", "show_price"),
-            ("🟢 Show Holders", "show_holders"),
-            ("🟢 Show DEX", "show_dex"),
-            ("🧨 Delete Token", "delete"),
-        ]:
-            kb.button(text=label, callback_data=f"editset:{mint}:{key}")
-        kb.adjust(3, 1, 1, 1, 1, 1, 1)
-    else:
-        kb.button(text="— CHART —", callback_data="noop")
-        kb.button(text="✅ DexS", callback_data=f"editset:{mint}:chart:DexS")
-        kb.button(text="DexT", callback_data=f"editset:{mint}:chart:DexT")
-        kb.button(text="GeC", callback_data=f"editset:{mint}:chart:GeC")
-        kb.button(text="— BUYBOT LANGUAGE —", callback_data="noop")
-        kb.button(text="🇺🇸 English ✅", callback_data=f"editset:{mint}:lang:English")
-        kb.button(text="🇷🇺 Russian", callback_data=f"editset:{mint}:lang:Russian")
-        kb.button(text="🇨🇳 Chinese", callback_data=f"editset:{mint}:lang:Chinese")
-        kb.adjust(3, 1, 3, 1, 2, 1)
+    kb.button(text="✅ Page 1", callback_data=f"editpage:{mint}:1")
+    rows = [
+        ("ℹ️ Buy Step", "buy_step", f"✏️ ({values.get('buy_step', 1)})"),
+        ("ℹ️ Min Buy", "min_buy", f"✏️ ({values.get('min_buy', 0)})"),
+        ("ℹ️ Link", "link", "✏️ (set)" if values.get('telegram_link') else "✏️ ()"),
+        ("ℹ️ Emoji", "emoji", f"✏️ ({values.get('emoji', '🟢')})"),
+        ("ℹ️ Media", "media", "✏️ (📸)" if values.get('media_file_id') else "✏️ ()"),
+    ]
+    for left, key, right in rows:
+        kb.button(text=left, callback_data=f"editset:{mint}:{key}")
+        kb.button(text=right, callback_data=f"editset:{mint}:{key}")
     kb.button(text="« Return", callback_data="menu:home")
-    kb.adjust(3)
+    kb.adjust(1, 2, 2, 2, 2, 2, 1)
     return kb.as_markup()
 
 

@@ -324,7 +324,7 @@ async def view_token(cq: CallbackQuery, db: DB):
     await cq.message.answer(
         f"Token Details\nName: <b>{row['name'] or row['symbol'] or mint[:6]}</b>\nSymbol: <b>{row['symbol'] or '—'}</b>\nMint: <code>{mint}</code>\nTelegram: {row['telegram_link'] or '—'}",
         parse_mode="HTML",
-        reply_markup=token_edit_page_kb(mint, 1),
+        reply_markup=token_edit_page_kb(mint, 1, (await _render_edit_page(db, mint, 1))[1]),
     )
     await cq.answer()
 
@@ -344,7 +344,8 @@ async def edit_token(cq: CallbackQuery, state: FSMContext, db: DB):
     mint = cq.data.split(":", 1)[1]
     await _ensure_token_settings(db, mint)
     await state.clear()
-    await cq.message.answer(await _render_edit_page(db, mint, 1), parse_mode="HTML", reply_markup=token_edit_page_kb(mint, 1))
+    edit_text, edit_values = await _render_edit_page(db, mint, 1)
+    await cq.message.answer(edit_text, parse_mode="HTML", reply_markup=token_edit_page_kb(mint, 1, edit_values))
     await cq.answer()
 
 
@@ -352,7 +353,8 @@ async def edit_token(cq: CallbackQuery, state: FSMContext, db: DB):
 async def edit_page(cq: CallbackQuery, db: DB):
     _, mint, page = cq.data.split(":", 2)
     page = int(page)
-    await cq.message.answer(await _render_edit_page(db, mint, page), parse_mode="HTML", reply_markup=token_edit_page_kb(mint, page))
+    edit_text, edit_values = await _render_edit_page(db, mint, 1)
+    await cq.message.answer(edit_text, parse_mode="HTML", reply_markup=token_edit_page_kb(mint, 1, edit_values))
     await cq.answer()
 
 
@@ -366,7 +368,7 @@ async def edit_set(cq: CallbackQuery, state: FSMContext):
     elif key in {"buy_step","min_buy","link","emoji","media"}:
         await state.set_state(EditTokenFlow.tg)
         await state.update_data(edit_mint=mint, edit_key=key)
-        prompts={"buy_step":"Send buy step number.","min_buy":"Send minimum buy in SOL.","link":"Send Telegram link.","emoji":"Send emoji.","media":"Send a photo to use as media or type skip."}
+        prompts={"buy_step":"Send buy step number.","min_buy":"Send minimum buy in SOL.","link":"Send Telegram link or type skip.","emoji":"Send emoji.","media":"Send a photo to use as media or type skip to clear it."}
         await cq.message.answer(prompts[key])
     await cq.answer()
 
@@ -397,7 +399,7 @@ async def edit_token_tg(msg: Message, state: FSMContext, db: DB):
     await conn.commit()
     await conn.close()
     await state.clear()
-    await msg.answer("✅ Token updated.", reply_markup=token_edit_page_kb(mint, 1))
+    await msg.answer("✅ Token updated.", reply_markup=token_edit_page_kb(mint, 1, (await _render_edit_page(db, mint, 1))[1]))
 
 
 @router.callback_query(F.data == "menu:group")
