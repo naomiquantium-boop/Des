@@ -713,10 +713,7 @@ async def forceadd(msg: Message, command: CommandObject, db: DB):
     if not await _ensure_owner(msg):
         return
     if not command.args:
-        return await msg.reply("Usage:
-<code>/forceadd MINT|https://t.me/yourlink</code>
-Or:
-<code>/forceadd MINT https://t.me/yourlink</code>", parse_mode='HTML')
+        return await msg.reply("Usage:\n<code>/forceadd MINT|https://t.me/yourlink</code>\nOr:\n<code>/forceadd MINT https://t.me/yourlink</code>", parse_mode="HTML")
     mint, tg = _parse_forceadd_args(command.args)
     if not mint:
         return await msg.reply("❌ Missing token mint.")
