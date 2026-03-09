@@ -21,7 +21,6 @@ class BuyWatcher:
         self.rpc = rpc
         self.helius = HeliusClient(settings.HELIUS_API_KEY) if settings.HELIUS_API_KEY else None
         self._running = False
-        self._last_sol_price = 100.0
         # cache chat types so we don't call get_chat repeatedly
         self._chat_type_cache: Dict[int, str] = {}
 
@@ -86,10 +85,6 @@ class BuyWatcher:
         ad_text = active_ad_text or await ads_svc.get_owner_fallback()
         ad_link = active_ad_link if active_ad_text else None
         sol_price = await sol_usd(settings.JUPITER_PRICE_URL)
-        if sol_price and sol_price > 0:
-            self._last_sol_price = sol_price
-        else:
-            sol_price = self._last_sol_price
 
         for mint, tgt in targets.items():
             if not self.helius:
@@ -125,7 +120,7 @@ class BuyWatcher:
         spent_symbol = ev.get("spent_symbol") or "SOL"
         spent_value = float(ev.get("spent_value") or 0.0)
         spent_usd = direct_spent_usd or ((float(meta.get("priceUsd")) * got_tokens) if meta.get("priceUsd") is not None and got_tokens else (spent_sol * sol_price if sol_price and spent_sol else 0.0))
-        effective_spent_sol = spent_sol or ((spent_usd / sol_price) if spent_usd and sol_price else (spent_usd / self._last_sol_price if spent_usd and self._last_sol_price else 0.0))
+        effective_spent_sol = spent_sol or ((spent_usd / sol_price) if spent_usd and sol_price else 0.0)
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
         if effective_spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
