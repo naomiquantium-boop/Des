@@ -54,6 +54,8 @@ class LeaderboardUpdater:
 
         metrics: dict[str, float] = {r['mint']: float(r['vol'] or 0) for r in buy_rows}
         labels: dict[str, str] = {}
+        chart_urls: dict[str, str | None] = {}
+        mcaps: dict[str, float | None] = {}
         for row in tracked:
             labels[row['mint']] = row['label']
             if row['force_trending'] or row['force_leaderboard'] or (row['trend_until_ts'] or 0) > now:
@@ -64,18 +66,23 @@ class LeaderboardUpdater:
                 try:
                     meta = await fetch_token_meta(mint)
                     labels[mint] = meta.get('symbol') or meta.get('name') or mint[:6]
+                    chart_urls[mint] = meta.get('dexUrl')
+                    mcaps[mint] = meta.get('mcapUsd')
                 except Exception:
                     labels[mint] = mint[:6]
+                    chart_urls[mint] = None
+                    mcaps[mint] = None
 
         ordered = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)[:10]
-        rows: List[Tuple[int, str, str, float]] = []
+        rows: List[Tuple[int, str, str, float, str | None]] = []
         for rank, (mint, vol) in enumerate(ordered, start=1):
             pct = await self._pct_change_24h(conn, mint, now)
-            metric = self._compact_metric(vol)
-            rows.append((rank, labels.get(mint, mint[:6]), metric, pct))
+            mcap = mcaps.get(mint)
+            metric = self._compact_metric(mcap if mcap and mcap > 0 else vol)
+            rows.append((rank, labels.get(mint, mint[:6]), metric, pct, chart_urls.get(mint)))
         while len(rows) < 10:
             n = len(rows) + 1
-            rows.append((n, "TOKEN", "0", 0.0))
+            rows.append((n, "TOKEN", "0", 0.0, None))
 
         footer_handle = f"@{settings.BOT_USERNAME}"
         text = build_leaderboard_message(rows, footer_handle)
