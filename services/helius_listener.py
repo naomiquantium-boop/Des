@@ -31,13 +31,80 @@ class HeliusClient:
 
 def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
     # Heuristic with SOL/WSOL/stablecoin support:
-    # - find token transfer of tracked mint to buyer
-    # - detect what was spent in native SOL or tokenTransfers (USDC/USDT/WSOL)
-    # - support routes where the actual spender is the signer / fee payer, not the final token receiver
+    # 1) Prefer Helius events.swap when present (best for Jupiter/aggregator routes)
+    # 2) Fallback to token/native transfers matching
     token_transfers = tx.get("tokenTransfers") or []
     native_transfers = tx.get("nativeTransfers") or []
     fee_payer = tx.get("feePayer") or tx.get("signer")
     account_keys = tx.get("accountData") or []
+
+    events = tx.get("events") or {}
+    swap = events.get("swap") or {}
+
+    def _fa(v: Any) -> float:
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0.0
+
+    # Helius enhanced swap format
+    try:
+        token_inputs = swap.get("tokenInputs") or []
+        token_outputs = swap.get("tokenOutputs") or []
+        native_input = swap.get("nativeInput") or {}
+        if token_outputs:
+            out = None
+            for item in token_outputs:
+                if item.get("mint") == mint and _fa(item.get("tokenAmount") or item.get("amount")) > 0:
+                    out = item
+                    break
+            if out is not None:
+                buyer = out.get("userAccount") or out.get("toUserAccount") or out.get("toTokenAccount") or fee_payer
+                amount = _fa(out.get("tokenAmount") or out.get("amount"))
+                spent_sol = 0.0
+                spent_usd = 0.0
+                spent_value = 0.0
+                spent_symbol = "SOL"
+
+                # native input first
+                lamports = _fa(native_input.get("amount"))
+                if lamports > 0:
+                    spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
+                    spent_value = spent_sol
+                    spent_symbol = "SOL"
+
+                # then token inputs (USDC/USDT/WSOL usually here)
+                for item in token_inputs:
+                    imint = item.get("mint")
+                    if imint == mint:
+                        continue
+                    sym = ((item.get("tokenSymbol") or item.get("symbol") or "").upper())
+                    val = _fa(item.get("tokenAmount") or item.get("amount"))
+                    if val <= 0:
+                        continue
+                    if sym in STABLE_SYMBOLS and val > spent_usd:
+                        spent_usd = val
+                        spent_value = val
+                        spent_symbol = sym
+                    elif imint == WSOL_MINT or sym == "WSOL":
+                        if val > spent_sol:
+                            spent_sol = val
+                            spent_value = val
+                            spent_symbol = "SOL"
+
+                if spent_sol > 0 or spent_usd > 0:
+                    return {
+                        "buyer": buyer,
+                        "got_tokens": amount,
+                        "spent_sol": spent_sol,
+                        "spent_usd": spent_usd,
+                        "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+                        "spent_symbol": spent_symbol,
+                        "signature": tx.get("signature"),
+                        "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
+                    }
+    except Exception:
+        pass
 
     def candidate_senders(buyer: str) -> list[str]:
         vals = []
