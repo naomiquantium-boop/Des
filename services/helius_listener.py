@@ -1,6 +1,6 @@
 from __future__ import annotations
 import httpx
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import time
 
 STABLE_SYMBOLS = {"USDC", "USDT"}
@@ -13,6 +13,7 @@ class HeliusClient:
         self.client = httpx.AsyncClient(timeout=timeout)
 
     async def get_address_txs(self, address: str, limit: int = 20, before: str | None = None) -> list[dict]:
+        # Enhanced transactions endpoint
         params = {"api-key": self.api_key}
         if before:
             params["before"] = before
@@ -22,22 +23,21 @@ class HeliusClient:
         data = r.json()
         if isinstance(data, dict) and data.get("error"):
             raise RuntimeError(data["error"])
+        # returns list newest->oldest
         return data[:limit]
 
     async def close(self):
         await self.client.aclose()
 
-
 def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
-    """
-    Buy detector tuned to stay permissive enough to keep posting buys, while
-    ignoring obvious sells. We prefer Helius swap events, then fall back to
-    transfer heuristics.
-    """
+    # Heuristic with SOL/WSOL/stablecoin support:
+    # 1) Prefer Helius events.swap when present (best for Jupiter/aggregator routes)
+    # 2) Fallback to token/native transfers matching
     token_transfers = tx.get("tokenTransfers") or []
     native_transfers = tx.get("nativeTransfers") or []
     fee_payer = tx.get("feePayer") or tx.get("signer")
     account_keys = tx.get("accountData") or []
+
     events = tx.get("events") or {}
     swap = events.get("swap") or {}
 
@@ -47,86 +47,76 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         except Exception:
             return 0.0
 
-    def _acct(item: dict, *keys: str) -> str | None:
-        for k in keys:
-            v = item.get(k)
-            if v:
-                return v
-        return None
-
-    # ----- Preferred path: Helius enhanced swap -----
+    # Helius enhanced swap format
     try:
         token_inputs = swap.get("tokenInputs") or []
         token_outputs = swap.get("tokenOutputs") or []
         native_input = swap.get("nativeInput") or {}
-
-        input_mint = any(i.get("mint") == mint and _fa(i.get("tokenAmount") or i.get("amount")) > 0 for i in token_inputs)
-        output_item = None
-        for item in token_outputs:
-            if item.get("mint") == mint and _fa(item.get("tokenAmount") or item.get("amount")) > 0:
-                output_item = item
-                break
-
-        # obvious sell: token in, no token out
-        if input_mint and output_item is None:
-            return None
-
-        if output_item is not None:
-            buyer = _acct(output_item, "userAccount", "toUserAccount", "toTokenAccount") or fee_payer
-            amount = _fa(output_item.get("tokenAmount") or output_item.get("amount"))
-            spent_sol = 0.0
-            spent_usd = 0.0
-            spent_value = 0.0
-            spent_symbol = "SOL"
-
-            lamports = _fa(native_input.get("amount"))
-            if lamports > 0:
-                spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
-                spent_value = spent_sol
+        if token_outputs:
+            out = None
+            for item in token_outputs:
+                if item.get("mint") == mint and _fa(item.get("tokenAmount") or item.get("amount")) > 0:
+                    out = item
+                    break
+            if out is not None:
+                buyer = out.get("userAccount") or out.get("toUserAccount") or out.get("toTokenAccount") or fee_payer
+                amount = _fa(out.get("tokenAmount") or out.get("amount"))
+                spent_sol = 0.0
+                spent_usd = 0.0
+                spent_value = 0.0
                 spent_symbol = "SOL"
 
-            for item in token_inputs:
-                imint = item.get("mint")
-                if imint == mint:
-                    continue
-                sym = (item.get("tokenSymbol") or item.get("symbol") or "").upper()
-                val = _fa(item.get("tokenAmount") or item.get("amount"))
-                if val <= 0:
-                    continue
-                if sym in STABLE_SYMBOLS and val > spent_usd:
-                    spent_usd = val
-                    spent_value = val
-                    spent_symbol = sym
-                elif imint == WSOL_MINT or sym == "WSOL":
-                    if val > spent_sol:
-                        spent_sol = val
-                        spent_value = val
-                        spent_symbol = "SOL"
+                # native input first
+                lamports = _fa(native_input.get("amount"))
+                if lamports > 0:
+                    spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
+                    spent_value = spent_sol
+                    spent_symbol = "SOL"
 
-            if spent_sol > 0 or spent_usd > 0:
-                return {
-                    "buyer": buyer,
-                    "got_tokens": amount,
-                    "spent_sol": spent_sol,
-                    "spent_usd": spent_usd,
-                    "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
-                    "spent_symbol": spent_symbol,
-                    "signature": tx.get("signature"),
-                    "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
-                }
+                # then token inputs (USDC/USDT/WSOL usually here)
+                for item in token_inputs:
+                    imint = item.get("mint")
+                    if imint == mint:
+                        continue
+                    sym = ((item.get("tokenSymbol") or item.get("symbol") or "").upper())
+                    val = _fa(item.get("tokenAmount") or item.get("amount"))
+                    if val <= 0:
+                        continue
+                    if sym in STABLE_SYMBOLS and val > spent_usd:
+                        spent_usd = val
+                        spent_value = val
+                        spent_symbol = sym
+                    elif imint == WSOL_MINT or sym == "WSOL":
+                        if val > spent_sol:
+                            spent_sol = val
+                            spent_value = val
+                            spent_symbol = "SOL"
+
+                if spent_sol > 0 or spent_usd > 0:
+                    return {
+                        "buyer": buyer,
+                        "got_tokens": amount,
+                        "spent_sol": spent_sol,
+                        "spent_usd": spent_usd,
+                        "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+                        "spent_symbol": spent_symbol,
+                        "signature": tx.get("signature"),
+                        "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
+                    }
     except Exception:
         pass
 
-    # ----- Transfer fallback -----
-    def candidate_senders(buyer: str | None) -> list[str]:
-        vals: list[str] = []
-        for v in [buyer, fee_payer, tx.get("signer")]:
+    def candidate_senders(buyer: str) -> list[str]:
+        vals = []
+        for v in [buyer, fee_payer]:
             if v and v not in vals:
                 vals.append(v)
         for item in account_keys:
-            acct = item.get("account") or item.get("pubkey")
-            # only include signer-ish accounts; broad inclusion caused missed buys
-            if acct and acct not in vals and item.get("signer"):
+            try:
+                acct = item.get("account") or item.get("pubkey")
+            except Exception:
+                acct = None
+            if acct and acct not in vals:
                 vals.append(acct)
         return vals
 
@@ -144,19 +134,20 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
             spent_value = spent_sol
             spent_symbol = "SOL"
         for ot in token_transfers:
-            if _acct(ot, "fromUserAccount", "fromTokenAccount") not in senders:
+            if (ot.get("fromUserAccount") or ot.get("fromTokenAccount")) not in senders:
                 continue
             omint = ot.get("mint")
             if omint == mint:
                 continue
-            oval = _fa(ot.get("tokenAmount") or ot.get("amount"))
+            oval = float(ot.get("tokenAmount", 0) or 0)
             if oval <= 0:
                 continue
-            sym = (ot.get("tokenSymbol") or ot.get("symbol") or "").upper()
-            if sym in STABLE_SYMBOLS and oval > spent_usd:
-                spent_usd = oval
-                spent_value = oval
-                spent_symbol = sym
+            sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
+            if sym in STABLE_SYMBOLS:
+                if oval > spent_usd:
+                    spent_usd = oval
+                    spent_value = oval
+                    spent_symbol = sym
             elif omint == WSOL_MINT or sym == "WSOL":
                 if oval > spent_sol:
                     spent_sol = oval
@@ -164,66 +155,46 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                     spent_symbol = "SOL"
         return spent_sol, spent_usd, spent_value, spent_symbol
 
-    # Gather mint in/out counts to reject obvious sells while staying permissive.
-    incoming: list[dict] = []
-    outgoing_to_check = 0.0
     for tt in token_transfers:
         if tt.get("mint") != mint:
             continue
-        amount = _fa(tt.get("tokenAmount") or tt.get("amount"))
-        if amount <= 0:
+        buyer = tt.get("toUserAccount") or tt.get("toTokenAccount")
+        amount = float(tt.get("tokenAmount", 0) or 0)
+        if not buyer or amount <= 0:
             continue
-        to_user = _acct(tt, "toUserAccount", "toTokenAccount")
-        from_user = _acct(tt, "fromUserAccount", "fromTokenAccount")
-        if to_user:
-            incoming.append({"buyer": to_user, "amount": amount, "from_user": from_user})
-        if from_user and from_user in {fee_payer, tx.get("signer")}:
-            outgoing_to_check += amount
 
-    if not incoming:
-        return None
+        senders = candidate_senders(buyer)
+        spent_sol, spent_usd, spent_value, spent_symbol = scan_spend(senders)
 
-    # choose largest incoming transfer as the bought amount
-    best = max(incoming, key=lambda x: x["amount"])
-    buyer = best["buyer"]
-    amount = best["amount"]
+        # Fallback: use the largest stable/WSOL outflow in the whole tx if sender matching failed.
+        if spent_sol <= 0 and spent_usd <= 0:
+            for ot in token_transfers:
+                omint = ot.get("mint")
+                if omint == mint:
+                    continue
+                oval = float(ot.get("tokenAmount", 0) or 0)
+                if oval <= 0:
+                    continue
+                sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
+                if sym in STABLE_SYMBOLS and oval > spent_usd:
+                    spent_usd = oval
+                    spent_value = oval
+                    spent_symbol = sym
+                elif (omint == WSOL_MINT or sym == "WSOL") and oval > spent_sol:
+                    spent_sol = oval
+                    spent_value = oval
+                    spent_symbol = "SOL"
 
-    # obvious sell / remove-liquidity guard: signer sends out much more tracked token than comes in
-    if outgoing_to_check > amount * 1.2:
-        return None
-
-    senders = candidate_senders(buyer)
-    spent_sol, spent_usd, spent_value, spent_symbol = scan_spend(senders)
-
-    # Fallback: use biggest stable/WSOL outflow in whole tx if sender matching missed router pattern.
-    if spent_sol <= 0 and spent_usd <= 0:
-        for ot in token_transfers:
-            omint = ot.get("mint")
-            if omint == mint:
-                continue
-            oval = _fa(ot.get("tokenAmount") or ot.get("amount"))
-            if oval <= 0:
-                continue
-            sym = (ot.get("tokenSymbol") or ot.get("symbol") or "").upper()
-            if sym in STABLE_SYMBOLS and oval > spent_usd:
-                spent_usd = oval
-                spent_value = oval
-                spent_symbol = sym
-            elif (omint == WSOL_MINT or sym == "WSOL") and oval > spent_sol:
-                spent_sol = oval
-                spent_value = oval
-                spent_symbol = "SOL"
-
-    if spent_sol <= 0 and spent_usd <= 0:
-        return None
-
-    return {
-        "buyer": buyer,
-        "got_tokens": amount,
-        "spent_sol": spent_sol,
-        "spent_usd": spent_usd,
-        "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
-        "spent_symbol": spent_symbol,
-        "signature": tx.get("signature"),
-        "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
-    }
+        if spent_sol <= 0 and spent_usd <= 0:
+            return None
+        return {
+            "buyer": buyer,
+            "got_tokens": amount,
+            "spent_sol": spent_sol,
+            "spent_usd": spent_usd,
+            "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+            "spent_symbol": spent_symbol,
+            "signature": tx.get("signature"),
+            "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
+        }
+    return None
