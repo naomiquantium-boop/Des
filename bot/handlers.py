@@ -55,6 +55,20 @@ ADS_PRICES = {
 def _is_owner(obj: Message | CallbackQuery) -> bool:
     return bool(obj.from_user and obj.from_user.id == settings.OWNER_ID)
 
+
+
+def _extract_tx_sig(v: str) -> str:
+    t = (v or '').strip()
+    if 'solscan.io/tx/' in t:
+        t = t.split('solscan.io/tx/', 1)[1]
+    if 'solana.fm/tx/' in t:
+        t = t.split('solana.fm/tx/', 1)[1]
+    if '?' in t:
+        t = t.split('?', 1)[0]
+    if '#' in t:
+        t = t.split('#', 1)[0]
+    return t.rstrip('/').strip()
+
 def _norm_tg(v: str | None) -> str | None:
     if not v:
         return None
@@ -597,11 +611,11 @@ async def invoice_txhash_prompt(cq: CallbackQuery, state: FSMContext):
 @router.message(InvoiceFlow.txhash)
 async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
     invoice_id = (await state.get_data()).get("invoice_id")
-    sig = (msg.text or "").strip()
+    sig = _extract_tx_sig((msg.text or '').strip())
     if not invoice_id:
         invoice_id = await _latest_pending_invoice_for_user(db, msg.from_user.id)
     if not invoice_id or len(sig) < 20:
-        return await msg.answer("Send a valid transaction hash.")
+        return await msg.answer('Send a valid transaction hash or Solscan link.')
     conn = await db.connect()
     cur = await conn.execute("SELECT status, amount_sol FROM invoices WHERE id=?", (invoice_id,))
     inv = await cur.fetchone()
@@ -616,15 +630,21 @@ async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: So
     if sig in used:
         await state.clear()
         return await msg.answer("This transaction hash was already used.")
-    await msg.answer("Checking transaction hash...")
-    from services.payment_verifier import verify_sol_transfer
-    res = await verify_sol_transfer(rpc, sig, settings.PAYMENT_WALLET, float(inv["amount_sol"]))
+    await msg.answer('Checking transaction hash...')
+    try:
+        from services.payment_verifier import verify_sol_transfer
+        res = await verify_sol_transfer(rpc, sig, settings.PAYMENT_WALLET, float(inv['amount_sol']))
+    except Exception:
+        await state.clear()
+        return await msg.answer('Could not check that transaction right now. Please tap Refresh in a moment.')
     if not res.ok or not res.signature:
-        return await msg.answer(res.reason)
+        await state.clear()
+        return await msg.answer(f'❌ Payment not detected. {res.reason}')
     if await _activate_invoice(db, int(invoice_id), res.signature, res.amount_sol):
+        await msg.answer('✅ Payment verified.')
         await msg.answer(await _activation_notice(db, int(invoice_id)))
     else:
-        await msg.answer("✅ Already paid.")
+        await msg.answer('✅ Already paid.')
     await state.clear()
 
 @router.callback_query(F.data.startswith("invoice:refresh:"))
