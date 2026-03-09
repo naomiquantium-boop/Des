@@ -83,6 +83,14 @@ async def _group_token(db: DB, group_id: int) -> str | None:
     await conn.close()
     return row[0] if row else None
 
+
+async def _latest_pending_invoice_for_user(db: DB, user_id: int):
+    conn = await db.connect()
+    cur = await conn.execute("SELECT id FROM invoices WHERE user_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1", (user_id,))
+    row = await cur.fetchone()
+    await conn.close()
+    return int(row[0]) if row else None
+
 async def _ensure_token_settings(db: DB, mint: str):
     conn = await db.connect()
     await conn.execute("INSERT OR IGNORE INTO token_settings(mint, created_at) VALUES(?,?)", (mint, int(time.time())))
@@ -583,13 +591,15 @@ async def invoice_txhash_prompt(cq: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.set_state(InvoiceFlow.txhash)
     await state.update_data(invoice_id=invoice_id)
-    await cq.message.answer("Send your transaction hash.")
+    await cq.message.answer("Send your transaction hash and I will verify the payment.")
     await cq.answer()
 
 @router.message(InvoiceFlow.txhash)
 async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
     invoice_id = (await state.get_data()).get("invoice_id")
     sig = (msg.text or "").strip()
+    if not invoice_id:
+        invoice_id = await _latest_pending_invoice_for_user(db, msg.from_user.id)
     if not invoice_id or len(sig) < 20:
         return await msg.answer("Send a valid transaction hash.")
     conn = await db.connect()
@@ -606,6 +616,7 @@ async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: So
     if sig in used:
         await state.clear()
         return await msg.answer("This transaction hash was already used.")
+    await msg.answer("Checking transaction hash...")
     from services.payment_verifier import verify_sol_transfer
     res = await verify_sol_transfer(rpc, sig, settings.PAYMENT_WALLET, float(inv["amount_sol"]))
     if not res.ok or not res.signature:
@@ -624,6 +635,22 @@ async def invoice_refresh(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
         await cq.message.answer(message)
         return await cq.answer("Verified")
     await cq.answer(message, show_alert=True)
+
+
+@router.message()
+async def txhash_fallback(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
+    text = (msg.text or '').strip()
+    if len(text) < 32 or ' ' in text or text.startswith('/'):
+        return
+    cur_state = await state.get_state()
+    if cur_state == InvoiceFlow.txhash.state:
+        return
+    invoice_id = await _latest_pending_invoice_for_user(db, msg.from_user.id)
+    if not invoice_id:
+        return
+    await state.set_state(InvoiceFlow.txhash)
+    await state.update_data(invoice_id=invoice_id)
+    await invoice_txhash_submit(msg, state, db, rpc)
 
 @router.message(Command("tokens"))
 async def tokens_cmd(msg: Message, db: DB):
