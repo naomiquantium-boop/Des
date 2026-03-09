@@ -63,14 +63,21 @@ class LeaderboardUpdater:
             if row['force_trending'] or row['force_leaderboard'] or (row['trend_until_ts'] or 0) > now:
                 metrics[row['mint']] = max(metrics.get(row['mint'], 0.0), 1.0)
 
-        # Always fetch token meta for leaderboard rows so the middle value is market cap,
-        # not recent buy volume, and so the DexScreener link is available.
+        # Prefer latest stored market-cap snapshots from live buy processing.
         for mint in list(all_mints):
+            try:
+                curm = await conn.execute("SELECT mcap_usd FROM mcap_snapshots WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,))
+                rowm = await curm.fetchone()
+                if rowm and rowm[0]:
+                    mcaps[mint] = float(rowm[0])
+            except Exception:
+                pass
             try:
                 meta = await fetch_token_meta(mint)
                 labels[mint] = meta.get('symbol') or meta.get('name') or labels.get(mint) or mint[:6]
                 chart_urls[mint] = meta.get('dexUrl')
-                mcaps[mint] = meta.get('mcapUsd')
+                if not mcaps.get(mint):
+                    mcaps[mint] = meta.get('mcapUsd')
             except Exception:
                 labels[mint] = labels.get(mint) or mint[:6]
                 chart_urls[mint] = chart_urls.get(mint)

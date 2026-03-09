@@ -116,10 +116,14 @@ class BuyWatcher:
         spent_sol = float(ev.get("spent_sol") or 0.0)
         got_tokens = float(ev.get("got_tokens") or 0.0)
         buyer = ev.get("buyer") or "Unknown"
-        spent_usd = (float(meta.get("priceUsd")) * got_tokens) if meta.get("priceUsd") is not None and got_tokens else (spent_sol * sol_price if sol_price and spent_sol else 0.0)
+        direct_spent_usd = float(ev.get("spent_usd") or 0.0)
+        spent_symbol = ev.get("spent_symbol") or "SOL"
+        spent_value = float(ev.get("spent_value") or 0.0)
+        spent_usd = direct_spent_usd or ((float(meta.get("priceUsd")) * got_tokens) if meta.get("priceUsd") is not None and got_tokens else (spent_sol * sol_price if sol_price and spent_sol else 0.0))
+        effective_spent_sol = spent_sol or ((spent_usd / sol_price) if spent_usd and sol_price else 0.0)
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
-        if spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
+        if effective_spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
             return
         now_ts = int(time.time())
         try:
@@ -128,6 +132,8 @@ class BuyWatcher:
                 await conn2.execute("INSERT INTO buys(mint, usd, ts) VALUES(?,?,?)", (mint, float(spent_usd), now_ts))
             if meta.get("priceUsd") is not None:
                 await conn2.execute("INSERT INTO price_snapshots(mint, price_usd, ts) VALUES(?,?,?)", (mint, float(meta.get("priceUsd")), now_ts))
+            if meta.get("mcapUsd") is not None:
+                await conn2.execute("INSERT INTO mcap_snapshots(mint, mcap_usd, ts) VALUES(?,?,?)", (mint, float(meta.get("mcapUsd")), now_ts))
             await conn2.commit()
             await conn2.close()
         except Exception:
@@ -163,8 +169,10 @@ class BuyWatcher:
         _ = build_buy_message_group(
             token_symbol=token_name,
             emoji="🟢",
-            spent_sol=spent_sol,
+            spent_sol=effective_spent_sol,
             spent_usd=spent_usd,
+            spent_symbol=spent_symbol,
+            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
             got_tokens=got_tokens,
             buyer=buyer,
             tx_url=tx_url,
@@ -179,8 +187,10 @@ class BuyWatcher:
         msg_text_channel = build_buy_message_channel(
             token_symbol=token_name,
             emoji="✅",
-            spent_sol=spent_sol,
+            spent_sol=effective_spent_sol,
             spent_usd=spent_usd,
+            spent_symbol=spent_symbol,
+            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
             got_tokens=got_tokens,
             buyer=buyer,
             tx_url=tx_url,
@@ -196,7 +206,7 @@ class BuyWatcher:
         # send to groups (respect group settings, but never below global min)
         for r in tgt["groups"]:
             min_buy = max(float(settings.MIN_BUY_DEFAULT_SOL), float(r["min_buy_sol"] or 0), float(token_cfg.get("min_buy") or 0))
-            if spent_sol is None or spent_sol < min_buy:
+            if effective_spent_sol is None or effective_spent_sol < min_buy:
                 continue
             emoji = token_cfg.get("emoji") or r["emoji"] or "🟢"
             tg = tg_url or r["telegram_link"] or None
@@ -211,8 +221,10 @@ class BuyWatcher:
                 msg_text2 = build_buy_message_channel(
                     token_symbol=token_name,
                     emoji="✅",
-                    spent_sol=spent_sol,
+                    spent_sol=effective_spent_sol,
                     spent_usd=spent_usd,
+                    spent_symbol=spent_symbol,
+                    spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
                     got_tokens=got_tokens,
                     buyer=buyer,
                     tx_url=tx_url,
@@ -239,8 +251,10 @@ class BuyWatcher:
             msg_text2 = build_buy_message_group(
                 token_symbol=token_name,
                 emoji=emoji,
-                spent_sol=spent_sol,
+                spent_sol=effective_spent_sol,
                 spent_usd=spent_usd,
+                spent_symbol=spent_symbol,
+                spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
                 got_tokens=got_tokens,
                 buyer=buyer,
                 tx_url=tx_url,
@@ -303,7 +317,7 @@ class BuyWatcher:
         # - token is either configured in a group OR owner-added for channel-only mode AND
         # - the buy meets at least the hard channel minimum of 0.25 SOL.
         channel_min_buy = max(0.25, float(settings.MIN_BUY_DEFAULT_SOL), float(token_cfg.get("min_buy") or 0))
-        if settings.POST_CHANNEL and (tgt.get("groups") or tgt.get("post_channel")) and spent_sol >= channel_min_buy:
+        if settings.POST_CHANNEL and (tgt.get("groups") or tgt.get("post_channel")) and effective_spent_sol >= channel_min_buy:
             try:
                 await self.bot.send_message(
                     settings.POST_CHANNEL,
