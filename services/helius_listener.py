@@ -27,7 +27,13 @@ class HeliusClient:
     async def close(self):
         await self.client.aclose()
 
+
 def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
+    """
+    Buy detector tuned to stay permissive enough to keep posting buys, while
+    ignoring obvious sells. We prefer Helius swap events, then fall back to
+    transfer heuristics.
+    """
     token_transfers = tx.get("tokenTransfers") or []
     native_transfers = tx.get("nativeTransfers") or []
     fee_payer = tx.get("feePayer") or tx.get("signer")
@@ -41,117 +47,179 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         except Exception:
             return 0.0
 
-    # Collect principal user accounts we treat as the trader.
-    principals: list[str] = []
-    for v in [fee_payer, tx.get("signer")]:
-        if v and v not in principals:
-            principals.append(v)
-    for item in account_keys:
-        acct = item.get("account") or item.get("pubkey")
-        if acct and acct not in principals:
-            principals.append(acct)
+    def _acct(item: dict, *keys: str) -> str | None:
+        for k in keys:
+            v = item.get(k)
+            if v:
+                return v
+        return None
 
-    def _is_principal(acct: str | None) -> bool:
-        return bool(acct and acct in principals)
-
-    def _net_token_for_principals(target_mint: str) -> tuple[float, float]:
-        incoming = 0.0
-        outgoing = 0.0
-        for tr in token_transfers:
-            if tr.get("mint") != target_mint:
-                continue
-            amt = _fa(tr.get("tokenAmount") or tr.get("amount"))
-            if amt <= 0:
-                continue
-            if _is_principal(tr.get("toUserAccount") or tr.get("toTokenAccount")):
-                incoming += amt
-            if _is_principal(tr.get("fromUserAccount") or tr.get("fromTokenAccount")):
-                outgoing += amt
-        return incoming, outgoing
-
-    def _net_quote_spend() -> tuple[float, float, float, str]:
-        # Returns (spent_sol, spent_usd, spent_value, spent_symbol) for quote assets
-        native_out = 0
-        native_in = 0
-        for nt in native_transfers:
-            amt = int(nt.get("amount", 0) or 0)
-            if amt <= 0:
-                continue
-            if _is_principal(nt.get("fromUserAccount")):
-                native_out += amt
-            if _is_principal(nt.get("toUserAccount")):
-                native_in += amt
-        spent_sol = max(0.0, (native_out - native_in) / 1_000_000_000)
-        spent_usd = 0.0
-        spent_value = spent_sol
-        spent_symbol = "SOL" if spent_sol > 0 else ""
-
-        stable_net = 0.0
-        wsol_net = 0.0
-        for tr in token_transfers:
-            tmint = tr.get("mint")
-            if tmint == mint:
-                continue
-            amt = _fa(tr.get("tokenAmount") or tr.get("amount"))
-            if amt <= 0:
-                continue
-            sym = (tr.get("tokenSymbol") or tr.get("symbol") or "").upper()
-            out = _is_principal(tr.get("fromUserAccount") or tr.get("fromTokenAccount"))
-            inn = _is_principal(tr.get("toUserAccount") or tr.get("toTokenAccount"))
-            delta = (amt if out else 0.0) - (amt if inn else 0.0)
-            if sym in STABLE_SYMBOLS:
-                stable_net = max(stable_net, delta)
-            elif tmint == WSOL_MINT or sym == "WSOL":
-                wsol_net = max(wsol_net, delta)
-        if stable_net > 0:
-            spent_usd = stable_net
-            spent_value = stable_net
-            spent_symbol = "USDC"
-        elif wsol_net > 0 and wsol_net > spent_sol:
-            spent_sol = wsol_net
-            spent_value = wsol_net
-            spent_symbol = "SOL"
-        return spent_sol, spent_usd, spent_value, spent_symbol or "SOL"
-
-    # Strong direction check using net flow of the tracked token.
-    incoming_mint, outgoing_mint = _net_token_for_principals(mint)
-    net_got = incoming_mint - outgoing_mint
-    if net_got <= 0:
-        return None  # sells / LP removals / internal transfers should not count as buys
-
-    # Prefer enhanced swap event, but only if it matches principal net token direction.
+    # ----- Preferred path: Helius enhanced swap -----
     try:
+        token_inputs = swap.get("tokenInputs") or []
         token_outputs = swap.get("tokenOutputs") or []
+        native_input = swap.get("nativeInput") or {}
+
+        input_mint = any(i.get("mint") == mint and _fa(i.get("tokenAmount") or i.get("amount")) > 0 for i in token_inputs)
+        output_item = None
         for item in token_outputs:
-            if item.get("mint") != mint:
-                continue
-            amt = _fa(item.get("tokenAmount") or item.get("amount"))
-            buyer = item.get("userAccount") or item.get("toUserAccount") or item.get("toTokenAccount") or fee_payer
-            if amt <= 0 or not _is_principal(buyer):
-                continue
-            spent_sol, spent_usd, spent_value, spent_symbol = _net_quote_spend()
-            if spent_sol <= 0 and spent_usd <= 0:
-                return None
-            return {
-                "buyer": buyer,
-                "got_tokens": net_got,
-                "spent_sol": spent_sol,
-                "spent_usd": spent_usd,
-                "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
-                "spent_symbol": spent_symbol,
-                "signature": tx.get("signature"),
-                "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
-            }
+            if item.get("mint") == mint and _fa(item.get("tokenAmount") or item.get("amount")) > 0:
+                output_item = item
+                break
+
+        # obvious sell: token in, no token out
+        if input_mint and output_item is None:
+            return None
+
+        if output_item is not None:
+            buyer = _acct(output_item, "userAccount", "toUserAccount", "toTokenAccount") or fee_payer
+            amount = _fa(output_item.get("tokenAmount") or output_item.get("amount"))
+            spent_sol = 0.0
+            spent_usd = 0.0
+            spent_value = 0.0
+            spent_symbol = "SOL"
+
+            lamports = _fa(native_input.get("amount"))
+            if lamports > 0:
+                spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
+                spent_value = spent_sol
+                spent_symbol = "SOL"
+
+            for item in token_inputs:
+                imint = item.get("mint")
+                if imint == mint:
+                    continue
+                sym = (item.get("tokenSymbol") or item.get("symbol") or "").upper()
+                val = _fa(item.get("tokenAmount") or item.get("amount"))
+                if val <= 0:
+                    continue
+                if sym in STABLE_SYMBOLS and val > spent_usd:
+                    spent_usd = val
+                    spent_value = val
+                    spent_symbol = sym
+                elif imint == WSOL_MINT or sym == "WSOL":
+                    if val > spent_sol:
+                        spent_sol = val
+                        spent_value = val
+                        spent_symbol = "SOL"
+
+            if spent_sol > 0 or spent_usd > 0:
+                return {
+                    "buyer": buyer,
+                    "got_tokens": amount,
+                    "spent_sol": spent_sol,
+                    "spent_usd": spent_usd,
+                    "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+                    "spent_symbol": spent_symbol,
+                    "signature": tx.get("signature"),
+                    "timestamp": tx.get("timestamp") or tx.get("blockTime") or int(time.time()),
+                }
     except Exception:
         pass
 
-    # Fallback based purely on net transfer direction.
-    spent_sol, spent_usd, spent_value, spent_symbol = _net_quote_spend()
+    # ----- Transfer fallback -----
+    def candidate_senders(buyer: str | None) -> list[str]:
+        vals: list[str] = []
+        for v in [buyer, fee_payer, tx.get("signer")]:
+            if v and v not in vals:
+                vals.append(v)
+        for item in account_keys:
+            acct = item.get("account") or item.get("pubkey")
+            # only include signer-ish accounts; broad inclusion caused missed buys
+            if acct and acct not in vals and item.get("signer"):
+                vals.append(acct)
+        return vals
+
+    def scan_spend(senders: list[str]) -> tuple[float, float, float, str]:
+        spent_sol = 0.0
+        spent_usd = 0.0
+        spent_value = 0.0
+        spent_symbol = "SOL"
+        spent_lamports = 0
+        for nt in native_transfers:
+            if nt.get("fromUserAccount") in senders:
+                spent_lamports += int(nt.get("amount", 0) or 0)
+        if spent_lamports > 0:
+            spent_sol = spent_lamports / 1_000_000_000
+            spent_value = spent_sol
+            spent_symbol = "SOL"
+        for ot in token_transfers:
+            if _acct(ot, "fromUserAccount", "fromTokenAccount") not in senders:
+                continue
+            omint = ot.get("mint")
+            if omint == mint:
+                continue
+            oval = _fa(ot.get("tokenAmount") or ot.get("amount"))
+            if oval <= 0:
+                continue
+            sym = (ot.get("tokenSymbol") or ot.get("symbol") or "").upper()
+            if sym in STABLE_SYMBOLS and oval > spent_usd:
+                spent_usd = oval
+                spent_value = oval
+                spent_symbol = sym
+            elif omint == WSOL_MINT or sym == "WSOL":
+                if oval > spent_sol:
+                    spent_sol = oval
+                    spent_value = spent_sol
+                    spent_symbol = "SOL"
+        return spent_sol, spent_usd, spent_value, spent_symbol
+
+    # Gather mint in/out counts to reject obvious sells while staying permissive.
+    incoming: list[dict] = []
+    outgoing_to_check = 0.0
+    for tt in token_transfers:
+        if tt.get("mint") != mint:
+            continue
+        amount = _fa(tt.get("tokenAmount") or tt.get("amount"))
+        if amount <= 0:
+            continue
+        to_user = _acct(tt, "toUserAccount", "toTokenAccount")
+        from_user = _acct(tt, "fromUserAccount", "fromTokenAccount")
+        if to_user:
+            incoming.append({"buyer": to_user, "amount": amount, "from_user": from_user})
+        if from_user and from_user in {fee_payer, tx.get("signer")}:
+            outgoing_to_check += amount
+
+    if not incoming:
+        return None
+
+    # choose largest incoming transfer as the bought amount
+    best = max(incoming, key=lambda x: x["amount"])
+    buyer = best["buyer"]
+    amount = best["amount"]
+
+    # obvious sell / remove-liquidity guard: signer sends out much more tracked token than comes in
+    if outgoing_to_check > amount * 1.2:
+        return None
+
+    senders = candidate_senders(buyer)
+    spent_sol, spent_usd, spent_value, spent_symbol = scan_spend(senders)
+
+    # Fallback: use biggest stable/WSOL outflow in whole tx if sender matching missed router pattern.
+    if spent_sol <= 0 and spent_usd <= 0:
+        for ot in token_transfers:
+            omint = ot.get("mint")
+            if omint == mint:
+                continue
+            oval = _fa(ot.get("tokenAmount") or ot.get("amount"))
+            if oval <= 0:
+                continue
+            sym = (ot.get("tokenSymbol") or ot.get("symbol") or "").upper()
+            if sym in STABLE_SYMBOLS and oval > spent_usd:
+                spent_usd = oval
+                spent_value = oval
+                spent_symbol = sym
+            elif (omint == WSOL_MINT or sym == "WSOL") and oval > spent_sol:
+                spent_sol = oval
+                spent_value = oval
+                spent_symbol = "SOL"
+
     if spent_sol <= 0 and spent_usd <= 0:
         return None
+
     return {
-        "buyer": fee_payer or tx.get("signer") or "Unknown",
-        "got_tokens": net_got,
+        "buyer": buyer,
+        "got_tokens": amount,
         "spent_sol": spent_sol,
         "spent_usd": spent_usd,
         "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
