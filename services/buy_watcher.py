@@ -14,6 +14,135 @@ from bot.keyboards import buy_kb
 
 TX_URL = "https://solscan.io/tx/{sig}"
 
+
+STABLE_MINTS = {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD6Qn1s9V3A7mL2b7xVX9r",  # USDT
+}
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+def _safe_float(v):
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+def _owner_mint_amounts(bals, owner: str | None, mint: str) -> float:
+    total = 0.0
+    for b in bals or []:
+        if (b.get("owner") or "") != (owner or ""):
+            continue
+        if (b.get("mint") or "") != mint:
+            continue
+        ui = (b.get("uiTokenAmount") or {})
+        total += _safe_float(ui.get("uiAmount") if ui.get("uiAmount") is not None else ui.get("uiAmountString"))
+    return total
+
+def _find_buy_in_rpc_tx(tx: dict, mint: str) -> dict | None:
+    if not tx or not tx.get("meta"):
+        return None
+    meta = tx.get("meta") or {}
+    # skip failed txs
+    if meta.get("err"):
+        return None
+
+    # skip obvious non-buy instruction patterns
+    logs = " ".join(meta.get("logMessages") or []).lower()
+    if any(x in logs for x in ["remove liquidity", "close position", "claim fee", "withdraw liquidity"]):
+        return None
+
+    message = (tx.get("transaction") or {}).get("message") or {}
+    account_keys = message.get("accountKeys") or []
+    key_list = []
+    for k in account_keys:
+        if isinstance(k, dict):
+            key_list.append(k.get("pubkey") or k.get("signer") or "")
+        else:
+            key_list.append(k)
+    signers = []
+    for i,k in enumerate(account_keys):
+        if isinstance(k, dict):
+            if k.get("signer"):
+                signers.append(k.get("pubkey"))
+        elif i == 0:
+            signers.append(k)
+    fee_payer = signers[0] if signers else (key_list[0] if key_list else None)
+
+    pre_tb = meta.get("preTokenBalances") or []
+    post_tb = meta.get("postTokenBalances") or []
+
+    # candidate buyers: owners with positive net delta in tracked mint
+    owners = set()
+    for b in pre_tb + post_tb:
+        if (b.get("mint") or "") == mint and b.get("owner"):
+            owners.add(b.get("owner"))
+    candidates = []
+    for owner in owners:
+        delta = _owner_mint_amounts(post_tb, owner, mint) - _owner_mint_amounts(pre_tb, owner, mint)
+        if delta > 0:
+            candidates.append((delta, owner))
+    if not candidates:
+        return None
+    got_tokens, buyer = max(candidates, key=lambda x: x[0])
+
+    # spender should lose quote asset; prefer same owner, then fee payer
+    def token_delta(owner: str | None, qmint: str) -> float:
+        return _owner_mint_amounts(post_tb, owner, qmint) - _owner_mint_amounts(pre_tb, owner, qmint)
+
+    spent_sol = 0.0
+    spent_usd = 0.0
+    spent_value = 0.0
+    spent_symbol = "SOL"
+
+    for owner in [buyer, fee_payer]:
+        if not owner:
+            continue
+        # stables first
+        for qmint, sym in [("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "USDC"), ("Es9vMFrzaCERmJfrF4H2FYD6Qn1s9V3A7mL2b7xVX9r", "USDT")]:
+            d = token_delta(owner, qmint)
+            if d < 0 and abs(d) > spent_usd:
+                spent_usd = abs(d)
+                spent_value = spent_usd
+                spent_symbol = sym
+        d = token_delta(owner, WSOL_MINT)
+        if d < 0 and abs(d) > spent_sol:
+            spent_sol = abs(d)
+            spent_value = spent_sol
+            spent_symbol = "SOL"
+
+    # native SOL delta for fee payer as fallback (excluding fee)
+    if spent_sol <= 0 and fee_payer and fee_payer in key_list:
+        try:
+            idx = key_list.index(fee_payer)
+            pre = int((meta.get("preBalances") or [])[idx])
+            post = int((meta.get("postBalances") or [])[idx])
+            fee = int(meta.get("fee") or 0)
+            lamports_spent = max(0, pre - post - fee)
+            spent_sol = lamports_spent / 1_000_000_000
+            if spent_sol > 0:
+                spent_value = spent_sol
+                spent_symbol = "SOL"
+        except Exception:
+            pass
+
+    if spent_sol <= 0 and spent_usd <= 0:
+        return None
+
+    sigs = tx.get("transaction", {}).get("signatures") or []
+    signature = sigs[0] if sigs else tx.get("signature")
+    block_time = tx.get("blockTime") or int(time.time())
+    return {
+        "buyer": buyer or fee_payer or "Unknown",
+        "got_tokens": got_tokens,
+        "spent_sol": spent_sol,
+        "spent_usd": spent_usd,
+        "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+        "spent_symbol": spent_symbol,
+        "signature": signature,
+        "timestamp": block_time,
+    }
+
+
 class BuyWatcher:
     def __init__(self, bot, db, rpc):
         self.bot = bot
@@ -92,21 +221,31 @@ class BuyWatcher:
             sol_price = self._last_sol_price
 
         for mint, tgt in targets.items():
-            if not self.helius:
-                continue  # require helius for reliable detection in this starter
             last_sig = await self._get_last_sig(conn, mint)
-            txs = await self.helius.get_address_txs(mint, limit=10)
-            # txs are newest first
             new_events = []
-            for tx in txs:
-                sig = tx.get("signature")
-                if not sig:
-                    continue
-                if sig == last_sig:
-                    break
-                ev = _find_buy_in_tx(tx, mint)
-                if ev:
-                    new_events.append(ev)
+            if self.helius:
+                txs = await self.helius.get_address_txs(mint, limit=10)
+                for tx in txs:
+                    sig = tx.get("signature")
+                    if not sig:
+                        continue
+                    if sig == last_sig:
+                        break
+                    ev = _find_buy_in_tx(tx, mint)
+                    if ev:
+                        new_events.append(ev)
+            else:
+                sig_infos = await self.rpc.get_signatures_for_address(mint, limit=15)
+                for info in sig_infos:
+                    sig = info.get("signature")
+                    if not sig:
+                        continue
+                    if sig == last_sig:
+                        break
+                    tx = await self.rpc.get_transaction(sig)
+                    ev = _find_buy_in_rpc_tx(tx, mint)
+                    if ev:
+                        new_events.append(ev)
             # process oldest -> newest
             for ev in reversed(new_events):
                 sig = ev["signature"]
