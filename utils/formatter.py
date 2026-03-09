@@ -85,11 +85,14 @@ def build_buy_message_channel(**kwargs) -> str:
     return _build(**kwargs)
 
 
-def build_leaderboard_message(rows: list[tuple[int, str, str, float]], footer_handle: str) -> str:
+def build_leaderboard_message(rows: list[tuple[int, str, str, float, str | None]], footer_handle: str) -> str:
     lines = ["🟢 PUMPTOOLS TRENDING", ""]
-    for rank, label, metric, pct in rows[:10]:
+    for row in rows[:10]:
+        rank, label, metric, pct, chart_url = row
         sign = "+" if pct > 0 else ""
-        lines.append(f'{RANK_EMOJIS.get(rank, str(rank))} <a href="{settings.LISTING_URL}">{label}</a> | {metric} | {sign}{pct:.0f}%')
+        token_part = _a(label, chart_url or settings.LISTING_URL)
+        metric_part = _a(metric, chart_url or settings.LISTING_URL)
+        lines.append(f'{RANK_EMOJIS.get(rank, str(rank))} {token_part} | {metric_part} | {sign}{pct:.0f}%')
     lines.append("")
     lines.append(f"<blockquote>💬 To trend add {footer_handle} in your group</blockquote>")
     return "\n".join(lines)
