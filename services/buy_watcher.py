@@ -263,13 +263,30 @@ class BuyWatcher:
                             parse_mode="HTML",
                         )
                     else:
-                        await self.bot.send_photo(
-                            chat_id,
-                            media,
-                            caption=msg_text2,
-                            reply_markup=buy_kb(mint),
-                            parse_mode="HTML",
-                        )
+                        if media_kind == "video":
+                            await self.bot.send_video(
+                                chat_id,
+                                media,
+                                caption=msg_text2,
+                                reply_markup=buy_kb(mint),
+                                parse_mode="HTML",
+                            )
+                        elif media_kind == "document":
+                            await self.bot.send_document(
+                                chat_id,
+                                media,
+                                caption=msg_text2,
+                                reply_markup=buy_kb(mint),
+                                parse_mode="HTML",
+                            )
+                        else:
+                            await self.bot.send_photo(
+                                chat_id,
+                                media,
+                                caption=msg_text2,
+                                reply_markup=buy_kb(mint),
+                                parse_mode="HTML",
+                            )
                 else:
                     await self.bot.send_message(
                         chat_id,
