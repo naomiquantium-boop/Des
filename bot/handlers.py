@@ -707,34 +707,146 @@ async def forceadd(msg: Message, command: CommandObject, db: DB):
 
 @router.message(Command("forcetrending"))
 async def forcetrending(msg: Message, command: CommandObject, db: DB):
-    if not await _ensure_owner(msg) or not command.args:
+    if not await _ensure_owner(msg):
         return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/forcetrending MINT [hours] [telegram_link]</code>", parse_mode="HTML")
+    mint, tg = _parse_forceadd_args(command.args)
+    if not mint:
+        return await msg.reply("❌ Missing token mint.")
     parts = command.args.split()
-    mint = parts[0]
-    hours = int(parts[1]) if len(parts) > 1 else 24
+    hours = 24
+    for item in parts[1:]:
+        if item.isdigit():
+            hours = int(item)
+            break
+    meta = await _upsert_tracked_token(db, mint, tg)
     conn = await db.connect()
-    await conn.execute("UPDATE tracked_tokens SET force_trending=1, force_leaderboard=1, trend_until_ts=? WHERE mint=?", (int(time.time()) + hours * 3600, mint))
+    await conn.execute("UPDATE tracked_tokens SET post_mode='channel', force_trending=1, force_leaderboard=1, trend_until_ts=?, telegram_link=COALESCE(?, telegram_link) WHERE mint=?", (int(time.time()) + hours * 3600, tg, mint))
     await conn.commit(); await conn.close()
-    await msg.reply("✅ Token forced into trending.")
+    await msg.reply(f"✅ {meta.get('symbol') or meta.get('name') or mint[:6]} forced into trending for {hours}h.")
 
 @router.message(Command("forceleaderboard"))
 async def forceleaderboard(msg: Message, command: CommandObject, db: DB):
-    if not await _ensure_owner(msg) or not command.args:
+    if not await _ensure_owner(msg):
         return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/forceleaderboard MINT</code>", parse_mode="HTML")
     mint = command.args.strip().split()[0]
+    await _upsert_tracked_token(db, mint)
     conn = await db.connect()
     await conn.execute("UPDATE tracked_tokens SET force_leaderboard=1 WHERE mint=?", (mint,))
     await conn.commit(); await conn.close()
     await msg.reply("✅ Token forced into leaderboard.")
 
+@router.message(Command("removetrending"))
+async def removetrending(msg: Message, command: CommandObject, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/removetrending MINT</code>", parse_mode="HTML")
+    mint = command.args.strip().split()[0]
+    conn = await db.connect()
+    await conn.execute("UPDATE tracked_tokens SET force_trending=0, trend_until_ts=0 WHERE mint=?", (mint,))
+    await conn.commit(); await conn.close()
+    await msg.reply("✅ Trending removed for token.")
+
+@router.message(Command("disabletoken"))
+async def disabletoken(msg: Message, command: CommandObject, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/disabletoken MINT</code>", parse_mode="HTML")
+    mint = command.args.strip().split()[0]
+    conn = await db.connect()
+    await conn.execute("UPDATE tracked_tokens SET post_mode='disabled', force_trending=0 WHERE mint=?", (mint,))
+    await conn.commit(); await conn.close()
+    await msg.reply("✅ Token disabled.")
+
+@router.message(Command("enabletoken"))
+async def enabletoken(msg: Message, command: CommandObject, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/enabletoken MINT</code>", parse_mode="HTML")
+    mint = command.args.strip().split()[0]
+    await _upsert_tracked_token(db, mint)
+    conn = await db.connect()
+    await conn.execute("UPDATE tracked_tokens SET post_mode='channel' WHERE mint=?", (mint,))
+    await conn.commit(); await conn.close()
+    await msg.reply("✅ Token enabled for channel posting.")
+
 @router.message(Command("setglobalad"))
 async def setglobalad(msg: Message, command: CommandObject, db: DB):
-    if not await _ensure_owner(msg) or not command.args:
+    if not await _ensure_owner(msg):
         return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/setglobalad your ad text</code>", parse_mode="HTML")
     conn = await db.connect(); ads = AdsService(conn)
     await ads.set_owner_fallback(command.args.strip())
     await conn.close()
     await msg.reply("✅ Fallback ad text updated.")
+
+@router.message(Command("listads"))
+async def listads(msg: Message, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    conn = await db.connect()
+    cur = await conn.execute("SELECT id, text, link, start_ts, end_ts, kind FROM ads ORDER BY id DESC LIMIT 20")
+    rows = await cur.fetchall()
+    await conn.close()
+    if not rows:
+        return await msg.reply("No ads found.")
+    lines = []
+    now = int(time.time())
+    for r in rows:
+        status = 'active' if r['start_ts'] <= now <= r['end_ts'] else ('upcoming' if now < r['start_ts'] else 'ended')
+        lines.append(f"#{r['id']} [{status}] {r['kind']} — {r['text'][:40]}")
+    await msg.reply("Ads:\n" + "\n".join(lines))
+
+@router.message(Command("addad"))
+async def addad(msg: Message, command: CommandObject, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/addad text|https://t.me/link|days</code>", parse_mode="HTML")
+    raw = command.args.strip()
+    if '|' not in raw:
+        return await msg.reply("Usage:\n<code>/addad text|https://t.me/link|days</code>", parse_mode="HTML")
+    parts = [x.strip() for x in raw.split('|')]
+    if len(parts) < 3:
+        return await msg.reply("Usage:\n<code>/addad text|https://t.me/link|days</code>", parse_mode="HTML")
+    text_ad, link, days_s = parts[0], _norm_tg(parts[1]), parts[2]
+    try:
+        days = max(1, int(days_s))
+    except Exception:
+        return await msg.reply("❌ Days must be a number.")
+    start_ts = int(time.time())
+    end_ts = start_ts + days * 86400
+    conn = await db.connect(); ads = AdsService(conn)
+    tx_sig = f"owner_ad_{start_ts}_{msg.from_user.id}"
+    await ads.create_ad(int(msg.from_user.id), text_ad, link, start_ts, end_ts, tx_sig, 0.0, kind='ad')
+    await conn.close()
+    await msg.reply(f"✅ Ad created for {days} day(s).")
+
+@router.message(Command("deletead"))
+async def deletead(msg: Message, command: CommandObject, db: DB):
+    if not await _ensure_owner(msg):
+        return
+    if not command.args:
+        return await msg.reply("Usage:\n<code>/deletead ID</code>", parse_mode="HTML")
+    try:
+        ad_id = int(command.args.strip().split()[0])
+    except Exception:
+        return await msg.reply("❌ Invalid ad ID.")
+    conn = await db.connect()
+    await conn.execute("DELETE FROM ads WHERE id=?", (ad_id,))
+    await conn.commit(); changes = conn.total_changes
+    await conn.close()
+    if changes:
+        await msg.reply("✅ Ad deleted.")
+    else:
+        await msg.reply("❌ Ad not found.")
 
 @router.message(Command("status"))
 async def status(msg: Message, db: DB):
@@ -745,9 +857,12 @@ async def status(msg: Message, db: DB):
     tokens = (await cur.fetchone())[0]
     cur = await conn.execute("SELECT COUNT(*) FROM invoices WHERE status='pending'")
     pending = (await cur.fetchone())[0]
+    cur = await conn.execute("SELECT COUNT(*) FROM tracked_tokens WHERE post_mode='channel'")
+    enabled = (await cur.fetchone())[0]
+    cur = await conn.execute("SELECT COUNT(*) FROM tracked_tokens WHERE force_trending=1 OR trend_until_ts>?", (int(time.time()),))
+    trending = (await cur.fetchone())[0]
     await conn.close()
-    await msg.reply(f"Tracked tokens: {tokens}\nPending invoices: {pending}")
-
+    await msg.reply(f"Tracked tokens: {tokens}\nChannel enabled: {enabled}\nTrending forced/live: {trending}\nPending invoices: {pending}")
 
 @router.message()
 async def txhash_fallback(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
