@@ -136,6 +136,20 @@ async def _invoice_text(db: DB, invoice_id: int) -> tuple[str, float]:
     )
     return text, float(inv["amount_sol"])
 
+async def _activation_notice(db: DB, invoice_id: int) -> str:
+    conn = await db.connect()
+    cur = await conn.execute("SELECT i.kind, i.token_mint, i.duration_sec, COALESCE(t.symbol, t.name, i.token_mint) AS label FROM invoices i LEFT JOIN tracked_tokens t ON t.mint=i.token_mint WHERE i.id=?", (invoice_id,))
+    row = await cur.fetchone()
+    await conn.close()
+    if not row:
+        return "✅ Payment verified and campaign activated."
+    duration_sec = int(row["duration_sec"] or 0)
+    if row["kind"] == "trending":
+        hours = max(1, duration_sec // 3600)
+        return f"✅ Payment verified.\n🔥 {row['label']} started trending for {hours} hour{'s' if hours != 1 else ''}."
+    days = max(1, duration_sec // 86400)
+    return f"✅ Payment verified.\n💎 {row['label']} advert started for {days} day{'s' if days != 1 else ''}."
+
 async def _used_signatures(db: DB) -> set[str]:
     conn = await db.connect()
     cur = await conn.execute("SELECT tx_sig FROM invoices WHERE tx_sig IS NOT NULL")
@@ -157,7 +171,7 @@ async def _check_invoice_payment(db: DB, rpc: SolanaRPC, invoice_id: int):
     if not res.ok or not res.signature:
         return (False, "Payment not detected yet.")
     if await _activate_invoice(db, invoice_id, res.signature, res.amount_sol):
-        return (True, "✅ Payment verified and campaign activated.")
+        return (True, await _activation_notice(db, invoice_id))
     return (True, "Already paid.")
 
 async def _activate_invoice(db: DB, invoice_id: int, sig: str, amount_sol: float):
@@ -194,7 +208,7 @@ async def _watch_invoice(bot, db: DB, rpc: SolanaRPC, chat_id: int, invoice_id: 
         res = await find_recent_payment(rpc, settings.PAYMENT_WALLET, float(inv["amount_sol"]), used)
         if res.ok and res.signature:
             if await _activate_invoice(db, invoice_id, res.signature, res.amount_sol):
-                await bot.send_message(chat_id, "✅ Payment detected and verified automatically.")
+                await bot.send_message(chat_id, await _activation_notice(db, invoice_id))
             return
 
 async def _upsert_tracked_token(db: DB, mint: str, telegram_link: str | None = None):
@@ -355,7 +369,7 @@ async def edit_set(cq: CallbackQuery, state: FSMContext):
         "min_buy": "Send minimum buy in SOL.",
         "link": "Send Telegram link or type skip.",
         "emoji": "Send emoji.",
-        "media": "Send a photo or GIF to use as media, or type skip to clear it.",
+        "media": "Send a photo, GIF, or video to use as media, or type skip to clear it.",
     }
     await cq.message.answer(prompts.get(key, "Send value."))
     await cq.answer()
@@ -386,13 +400,22 @@ async def edit_token_value(msg: Message, state: FSMContext, db: DB):
             await conn.execute("UPDATE token_settings SET media_file_id=?, media_kind='photo' WHERE mint=?", (msg.photo[-1].file_id, mint))
         elif getattr(msg, 'animation', None):
             await conn.execute("UPDATE token_settings SET media_file_id=?, media_kind='animation' WHERE mint=?", (msg.animation.file_id, mint))
+        elif getattr(msg, 'video', None):
+            await conn.execute("UPDATE token_settings SET media_file_id=?, media_kind='video' WHERE mint=?", (msg.video.file_id, mint))
+        elif getattr(msg, 'animation', None):
+            await conn.execute("UPDATE token_settings SET media_file_id=?, media_kind='animation' WHERE mint=?", (msg.animation.file_id, mint))
         elif getattr(msg, 'document', None):
-            mime = getattr(msg.document, 'mime_type', '') or ''
-            kind = 'animation' if ('gif' in mime or mime == 'video/mp4') else 'document'
+            mime = (getattr(msg.document, 'mime_type', '') or '').lower()
+            if 'gif' in mime:
+                kind = 'animation'
+            elif mime.startswith('video/') or mime == 'application/octet-stream':
+                kind = 'video'
+            else:
+                kind = 'document'
             await conn.execute("UPDATE token_settings SET media_file_id=?, media_kind=? WHERE mint=?", (msg.document.file_id, kind, mint))
         else:
             await conn.close()
-            return await msg.answer('Send a photo/GIF or type skip.')
+            return await msg.answer('Send a photo, GIF, or video, or type skip.')
     await conn.commit(); await conn.close()
     await state.clear()
     text, values = await _render_edit_page(db, mint)
@@ -588,7 +611,7 @@ async def invoice_txhash_submit(msg: Message, state: FSMContext, db: DB, rpc: So
     if not res.ok or not res.signature:
         return await msg.answer(res.reason)
     if await _activate_invoice(db, int(invoice_id), res.signature, res.amount_sol):
-        await msg.answer("✅ Payment verified and campaign activated.")
+        await msg.answer(await _activation_notice(db, int(invoice_id)))
     else:
         await msg.answer("✅ Already paid.")
     await state.clear()
