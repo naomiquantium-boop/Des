@@ -18,8 +18,8 @@ class Settings(BaseModel):
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 
-    SOLANA_RPC: str = _get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-    SOLANA_WS: str = _get("SOLANA_WS", "wss://api.mainnet-beta.solana.com")
+    SOLANA_RPC: str = os.getenv("SOLANA_RPC") or os.getenv("SOLANA_RPC_URL") or "https://api.mainnet-beta.solana.com"
+    SOLANA_WS: str = os.getenv("SOLANA_WS") or "wss://api.mainnet-beta.solana.com"
     HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "")
 
     PAYMENT_WALLET: str = _get("PAYMENT_WALLET")
