@@ -1,11 +1,11 @@
 from __future__ import annotations
 import asyncio
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 import aiosqlite
 
 from bot.config import settings
-from services.helius_listener import HeliusClient, _find_buy_in_tx
+from services.helius_listener import HeliusClient, _find_buy_in_tx, WSOL_MINT
 from services.token_meta import fetch_token_meta
 from services.ads_service import AdsService
 from utils.price import sol_usd
@@ -13,133 +13,165 @@ from utils.formatter import build_buy_message_group, build_buy_message_channel
 from bot.keyboards import buy_kb
 
 TX_URL = "https://solscan.io/tx/{sig}"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+USDT_MINT = "Es9vMFrzaCERmJfrF4H2FYD8M6rjX4jvQ7bF4Y3Pp7k"  # common mainnet mint
+STABLE_MINTS = {USDC_MINT, USDT_MINT}
 
 
-STABLE_MINTS = {
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
-    "Es9vMFrzaCERmJfrF4H2FYD6Qn1s9V3A7mL2b7xVX9r",  # USDT
-}
-WSOL_MINT = "So11111111111111111111111111111111111111112"
-
-def _safe_float(v):
+def _safe_float(v) -> float:
     try:
         return float(v or 0)
     except Exception:
         return 0.0
 
-def _owner_mint_amounts(bals, owner: str | None, mint: str) -> float:
-    total = 0.0
-    for b in bals or []:
-        if (b.get("owner") or "") != (owner or ""):
-            continue
-        if (b.get("mint") or "") != mint:
-            continue
-        ui = (b.get("uiTokenAmount") or {})
-        total += _safe_float(ui.get("uiAmount") if ui.get("uiAmount") is not None else ui.get("uiAmountString"))
-    return total
 
-def _find_buy_in_rpc_tx(tx: dict, mint: str) -> dict | None:
-    if not tx or not tx.get("meta"):
-        return None
+def _token_balance_maps(tx: dict, mint: str):
     meta = tx.get("meta") or {}
-    # skip failed txs
-    if meta.get("err"):
-        return None
+    pre = meta.get("preTokenBalances") or []
+    post = meta.get("postTokenBalances") or []
 
-    # skip obvious non-buy instruction patterns
-    logs = " ".join(meta.get("logMessages") or []).lower()
-    if any(x in logs for x in ["remove liquidity", "close position", "claim fee", "withdraw liquidity"]):
-        return None
+    def collect(rows):
+        m = {}
+        for r in rows:
+            if r.get("mint") != mint:
+                continue
+            owner = r.get("owner") or r.get("accountIndex")
+            amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+            if owner is not None:
+                m[owner] = amt
+        return m
 
-    message = (tx.get("transaction") or {}).get("message") or {}
-    account_keys = message.get("accountKeys") or []
-    key_list = []
-    for k in account_keys:
-        if isinstance(k, dict):
-            key_list.append(k.get("pubkey") or k.get("signer") or "")
+    return collect(pre), collect(post)
+
+
+def _all_token_deltas(tx: dict):
+    meta = tx.get("meta") or {}
+    pre = meta.get("preTokenBalances") or []
+    post = meta.get("postTokenBalances") or []
+    keys = set()
+    for r in pre + post:
+        keys.add((r.get("mint"), r.get("owner") or r.get("accountIndex")))
+    deltas = {}
+    for mint, owner in keys:
+        pre_amt = 0.0
+        post_amt = 0.0
+        for r in pre:
+            if r.get("mint") == mint and (r.get("owner") or r.get("accountIndex")) == owner:
+                pre_amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+                break
+        for r in post:
+            if r.get("mint") == mint and (r.get("owner") or r.get("accountIndex")) == owner:
+                post_amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+                break
+        deltas[(mint, owner)] = post_amt - pre_amt
+    return deltas
+
+
+def _signers_and_fee_payer(tx: dict):
+    msg = ((tx.get("transaction") or {}).get("message") or {})
+    aks = msg.get("accountKeys") or []
+    principals = []
+    fee_payer = None
+    for i, a in enumerate(aks):
+        if isinstance(a, str):
+            pubkey = a
+            signer = (i == 0)
         else:
-            key_list.append(k)
-    signers = []
-    for i,k in enumerate(account_keys):
-        if isinstance(k, dict):
-            if k.get("signer"):
-                signers.append(k.get("pubkey"))
-        elif i == 0:
-            signers.append(k)
-    fee_payer = signers[0] if signers else (key_list[0] if key_list else None)
+            pubkey = a.get("pubkey")
+            signer = bool(a.get("signer")) or (i == 0)
+        if i == 0:
+            fee_payer = pubkey
+        if signer and pubkey and pubkey not in principals:
+            principals.append(pubkey)
+    if fee_payer and fee_payer not in principals:
+        principals.append(fee_payer)
+    return principals, fee_payer, aks
 
-    pre_tb = meta.get("preTokenBalances") or []
-    post_tb = meta.get("postTokenBalances") or []
 
-    # candidate buyers: owners with positive net delta in tracked mint
-    owners = set()
-    for b in pre_tb + post_tb:
-        if (b.get("mint") or "") == mint and b.get("owner"):
-            owners.add(b.get("owner"))
-    candidates = []
-    for owner in owners:
-        delta = _owner_mint_amounts(post_tb, owner, mint) - _owner_mint_amounts(pre_tb, owner, mint)
-        if delta > 0:
-            candidates.append((delta, owner))
-    if not candidates:
+def _native_spend_sol(tx: dict, principals, fee_payer, aks):
+    meta = tx.get("meta") or {}
+    pre = meta.get("preBalances") or []
+    post = meta.get("postBalances") or []
+    fee = _safe_float(meta.get("fee"))
+    spent = 0.0
+    for i, a in enumerate(aks):
+        pubkey = a if isinstance(a, str) else a.get("pubkey")
+        if pubkey not in principals:
+            continue
+        if i >= len(pre) or i >= len(post):
+            continue
+        delta_lamports = post[i] - pre[i]
+        if delta_lamports < 0:
+            dec = -delta_lamports
+            if pubkey == fee_payer:
+                dec = max(0, dec - fee)
+            spent = max(spent, dec / 1_000_000_000)
+    return spent
+
+
+def _find_buy_in_rpc_tx(tx: dict, mint: str) -> Optional[dict]:
+    # Ignore obvious non-buy action labels from parsed transaction.
+    meta = tx.get("meta") or {}
+    logs = " ".join(meta.get("logMessages") or []).lower()
+    if any(x in logs for x in ["remove_liquidity", "withdraw", "claim", "closeposition", "remove liquidity"]):
         return None
-    got_tokens, buyer = max(candidates, key=lambda x: x[0])
 
-    # spender should lose quote asset; prefer same owner, then fee payer
-    def token_delta(owner: str | None, qmint: str) -> float:
-        return _owner_mint_amounts(post_tb, owner, qmint) - _owner_mint_amounts(pre_tb, owner, qmint)
+    principals, fee_payer, aks = _signers_and_fee_payer(tx)
+    pre_t, post_t = _token_balance_maps(tx, mint)
+    deltas_tracked = {owner: post_t.get(owner, 0.0) - pre_t.get(owner, 0.0) for owner in set(pre_t) | set(post_t)}
 
+    # Buyer must be one of the signers / fee payer and net receive tracked token.
+    buyer = None
+    got_tokens = 0.0
+    for owner in principals:
+        delta = deltas_tracked.get(owner, 0.0)
+        if delta > got_tokens:
+            got_tokens = delta
+            buyer = owner
+    if not buyer or got_tokens <= 0:
+        return None
+
+    # If signer also net sent out tracked token, treat as sell / other interaction.
+    if any(deltas_tracked.get(owner, 0.0) < 0 for owner in principals):
+        return None
+
+    token_deltas = _all_token_deltas(tx)
     spent_sol = 0.0
     spent_usd = 0.0
     spent_value = 0.0
     spent_symbol = "SOL"
 
-    for owner in [buyer, fee_payer]:
-        if not owner:
-            continue
-        # stables first
-        for qmint, sym in [("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "USDC"), ("Es9vMFrzaCERmJfrF4H2FYD6Qn1s9V3A7mL2b7xVX9r", "USDT")]:
-            d = token_delta(owner, qmint)
-            if d < 0 and abs(d) > spent_usd:
-                spent_usd = abs(d)
-                spent_value = spent_usd
-                spent_symbol = sym
-        d = token_delta(owner, WSOL_MINT)
-        if d < 0 and abs(d) > spent_sol:
-            spent_sol = abs(d)
-            spent_value = spent_sol
-            spent_symbol = "SOL"
+    for owner in principals:
+        wsol_delta = token_deltas.get((WSOL_MINT, owner), 0.0)
+        if wsol_delta < 0:
+            spent_sol = max(spent_sol, -wsol_delta)
+        for stable in STABLE_MINTS:
+            sd = token_deltas.get((stable, owner), 0.0)
+            if sd < 0:
+                spent_usd = max(spent_usd, -sd)
 
-    # native SOL delta for fee payer as fallback (excluding fee)
-    if spent_sol <= 0 and fee_payer and fee_payer in key_list:
-        try:
-            idx = key_list.index(fee_payer)
-            pre = int((meta.get("preBalances") or [])[idx])
-            post = int((meta.get("postBalances") or [])[idx])
-            fee = int(meta.get("fee") or 0)
-            lamports_spent = max(0, pre - post - fee)
-            spent_sol = lamports_spent / 1_000_000_000
-            if spent_sol > 0:
-                spent_value = spent_sol
-                spent_symbol = "SOL"
-        except Exception:
-            pass
+    if spent_sol <= 0 and spent_usd <= 0:
+        spent_sol = _native_spend_sol(tx, principals, fee_payer, aks)
 
     if spent_sol <= 0 and spent_usd <= 0:
         return None
 
-    sigs = tx.get("transaction", {}).get("signatures") or []
-    signature = sigs[0] if sigs else tx.get("signature")
-    block_time = tx.get("blockTime") or int(time.time())
+    if spent_usd > 0:
+        spent_value = spent_usd
+        spent_symbol = "USDC"
+    else:
+        spent_value = spent_sol
+        spent_symbol = "SOL"
+
     return {
-        "buyer": buyer or fee_payer or "Unknown",
+        "buyer": buyer,
         "got_tokens": got_tokens,
         "spent_sol": spent_sol,
         "spent_usd": spent_usd,
-        "spent_value": spent_value if spent_value > 0 else (spent_usd or spent_sol),
+        "spent_value": spent_value,
         "spent_symbol": spent_symbol,
-        "signature": signature,
-        "timestamp": block_time,
+        "signature": tx.get("transaction", {}).get("signatures", [None])[0] or tx.get("signature"),
+        "timestamp": tx.get("blockTime") or int(time.time()),
     }
 
 
@@ -151,11 +183,9 @@ class BuyWatcher:
         self.helius = HeliusClient(settings.HELIUS_API_KEY) if settings.HELIUS_API_KEY else None
         self._running = False
         self._last_sol_price = 100.0
-        # cache chat types so we don't call get_chat repeatedly
         self._chat_type_cache: Dict[int, str] = {}
 
     async def _chat_type(self, chat_id: int) -> str:
-        """Return Telegram chat type (group/supergroup/channel/private)."""
         if chat_id in self._chat_type_cache:
             return self._chat_type_cache[chat_id]
         try:
@@ -167,7 +197,6 @@ class BuyWatcher:
         return ctype
 
     async def _load_targets(self, conn: aiosqlite.Connection) -> dict:
-        # returns mint -> {groups:[(group_id, settings)], post_channel:bool}
         cur = await conn.execute("SELECT * FROM group_settings WHERE is_active=1")
         rows = await cur.fetchall()
         m = {}
@@ -202,10 +231,52 @@ class BuyWatcher:
         while self._running:
             try:
                 await self.tick()
-            except Exception as e:
-                # keep running
+            except Exception:
                 pass
             await asyncio.sleep(settings.POLL_INTERVAL_SEC)
+
+    async def _fetch_events(self, mint: str, last_sig: str | None):
+        events = []
+        newest_sig = None
+        # Prefer Helius if configured and healthy.
+        if self.helius:
+            try:
+                txs = await self.helius.get_address_txs(mint, limit=10)
+                for tx in txs:
+                    sig = tx.get("signature")
+                    if not sig:
+                        continue
+                    if newest_sig is None:
+                        newest_sig = sig
+                    if sig == last_sig:
+                        break
+                    ev = _find_buy_in_tx(tx, mint)
+                    if ev:
+                        events.append(ev)
+                return list(reversed(events)), newest_sig
+            except Exception:
+                pass
+        # Fallback to plain RPC / Alchemy.
+        try:
+            sigs = await self.rpc.get_signatures_for_address(mint, limit=10)
+            collected = []
+            for item in sigs:
+                sig = item.get("signature")
+                if not sig:
+                    continue
+                if newest_sig is None:
+                    newest_sig = sig
+                if sig == last_sig:
+                    break
+                tx = await self.rpc.get_transaction(sig)
+                if not tx:
+                    continue
+                ev = _find_buy_in_rpc_tx(tx, mint)
+                if ev:
+                    collected.append(ev)
+            return list(reversed(collected)), newest_sig
+        except Exception:
+            return [], newest_sig
 
     async def tick(self):
         conn = await self.db.connect()
@@ -222,32 +293,10 @@ class BuyWatcher:
 
         for mint, tgt in targets.items():
             last_sig = await self._get_last_sig(conn, mint)
-            new_events = []
-            if self.helius:
-                txs = await self.helius.get_address_txs(mint, limit=10)
-                for tx in txs:
-                    sig = tx.get("signature")
-                    if not sig:
-                        continue
-                    if sig == last_sig:
-                        break
-                    ev = _find_buy_in_tx(tx, mint)
-                    if ev:
-                        new_events.append(ev)
-            else:
-                sig_infos = await self.rpc.get_signatures_for_address(mint, limit=15)
-                for info in sig_infos:
-                    sig = info.get("signature")
-                    if not sig:
-                        continue
-                    if sig == last_sig:
-                        break
-                    tx = await self.rpc.get_transaction(sig)
-                    ev = _find_buy_in_rpc_tx(tx, mint)
-                    if ev:
-                        new_events.append(ev)
-            # process oldest -> newest
-            for ev in reversed(new_events):
+            new_events, newest_sig = await self._fetch_events(mint, last_sig)
+            if newest_sig and newest_sig != last_sig and not new_events:
+                await self._set_last_sig(conn, mint, newest_sig)
+            for ev in new_events:
                 sig = ev["signature"]
                 await self._set_last_sig(conn, mint, sig)
                 await self._post_buy(mint, ev, tgt, ad_text, ad_link, sol_price)
