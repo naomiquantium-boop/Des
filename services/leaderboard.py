@@ -63,25 +63,34 @@ class LeaderboardUpdater:
             if row['force_trending'] or row['force_leaderboard'] or (row['trend_until_ts'] or 0) > now:
                 metrics[row['mint']] = max(metrics.get(row['mint'], 0.0), 1.0)
 
-        # Prefer latest stored market-cap snapshots from live buy processing.
+        # Prefer fresh DexScreener market cap data first; fall back to stored snapshots only if needed.
         for mint in list(all_mints):
+            snap_mcap = None
             try:
                 curm = await conn.execute("SELECT mcap_usd FROM mcap_snapshots WHERE mint=? ORDER BY ts DESC LIMIT 1", (mint,))
                 rowm = await curm.fetchone()
                 if rowm and rowm[0]:
-                    mcaps[mint] = float(rowm[0])
+                    snap_mcap = float(rowm[0])
             except Exception:
-                pass
+                snap_mcap = None
             try:
                 meta = await fetch_token_meta(mint)
                 labels[mint] = meta.get('symbol') or meta.get('name') or labels.get(mint) or mint[:6]
                 chart_urls[mint] = meta.get('dexUrl')
-                if not mcaps.get(mint):
-                    mcaps[mint] = meta.get('mcapUsd')
+                fresh_mcap = meta.get('mcapUsd')
+                # Ignore obviously wrong tiny values when a real market cap should be in K/M.
+                if fresh_mcap is not None and float(fresh_mcap) >= 1000:
+                    mcaps[mint] = float(fresh_mcap)
+                elif snap_mcap is not None and float(snap_mcap) >= 1000:
+                    mcaps[mint] = float(snap_mcap)
+                elif fresh_mcap is not None:
+                    mcaps[mint] = float(fresh_mcap)
+                else:
+                    mcaps[mint] = snap_mcap
             except Exception:
                 labels[mint] = labels.get(mint) or mint[:6]
                 chart_urls[mint] = chart_urls.get(mint)
-                mcaps[mint] = mcaps.get(mint)
+                mcaps[mint] = snap_mcap
 
         ordered = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)[:10]
         rows: List[Tuple[int, str, str, float, str | None]] = []

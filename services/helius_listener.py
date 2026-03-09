@@ -32,35 +32,42 @@ class HeliusClient:
 def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
     # Heuristic with SOL/WSOL/stablecoin support:
     # - find token transfer of tracked mint to buyer
-    # - detect what the buyer spent in native SOL or tokenTransfers (USDC/USDT/WSOL)
+    # - detect what was spent in native SOL or tokenTransfers (USDC/USDT/WSOL)
+    # - support routes where the actual spender is the signer / fee payer, not the final token receiver
     token_transfers = tx.get("tokenTransfers") or []
     native_transfers = tx.get("nativeTransfers") or []
-    for tt in token_transfers:
-        if tt.get("mint") != mint:
-            continue
-        buyer = tt.get("toUserAccount") or tt.get("toTokenAccount")
-        amount = float(tt.get("tokenAmount", 0) or 0)
-        if not buyer or amount <= 0:
-            continue
+    fee_payer = tx.get("feePayer") or tx.get("signer")
+    account_keys = tx.get("accountData") or []
 
+    def candidate_senders(buyer: str) -> list[str]:
+        vals = []
+        for v in [buyer, fee_payer]:
+            if v and v not in vals:
+                vals.append(v)
+        for item in account_keys:
+            try:
+                acct = item.get("account") or item.get("pubkey")
+            except Exception:
+                acct = None
+            if acct and acct not in vals:
+                vals.append(acct)
+        return vals
+
+    def scan_spend(senders: list[str]) -> tuple[float, float, float, str]:
         spent_sol = 0.0
         spent_usd = 0.0
         spent_value = 0.0
         spent_symbol = "SOL"
-
-        # Native SOL outflow from buyer
         spent_lamports = 0
         for nt in native_transfers:
-            if nt.get("fromUserAccount") == buyer:
+            if nt.get("fromUserAccount") in senders:
                 spent_lamports += int(nt.get("amount", 0) or 0)
         if spent_lamports > 0:
             spent_sol = spent_lamports / 1_000_000_000
             spent_value = spent_sol
             spent_symbol = "SOL"
-
-        # Token outflow from buyer (USDC/USDT/WSOL)
         for ot in token_transfers:
-            if (ot.get("fromUserAccount") or ot.get("fromTokenAccount")) != buyer:
+            if (ot.get("fromUserAccount") or ot.get("fromTokenAccount")) not in senders:
                 continue
             omint = ot.get("mint")
             if omint == mint:
@@ -70,13 +77,46 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 continue
             sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
             if sym in STABLE_SYMBOLS:
-                spent_usd = max(spent_usd, oval)
-                spent_value = oval
-                spent_symbol = sym
+                if oval > spent_usd:
+                    spent_usd = oval
+                    spent_value = oval
+                    spent_symbol = sym
             elif omint == WSOL_MINT or sym == "WSOL":
-                spent_sol = max(spent_sol, oval)
-                spent_value = spent_sol
-                spent_symbol = "SOL"
+                if oval > spent_sol:
+                    spent_sol = oval
+                    spent_value = spent_sol
+                    spent_symbol = "SOL"
+        return spent_sol, spent_usd, spent_value, spent_symbol
+
+    for tt in token_transfers:
+        if tt.get("mint") != mint:
+            continue
+        buyer = tt.get("toUserAccount") or tt.get("toTokenAccount")
+        amount = float(tt.get("tokenAmount", 0) or 0)
+        if not buyer or amount <= 0:
+            continue
+
+        senders = candidate_senders(buyer)
+        spent_sol, spent_usd, spent_value, spent_symbol = scan_spend(senders)
+
+        # Fallback: use the largest stable/WSOL outflow in the whole tx if sender matching failed.
+        if spent_sol <= 0 and spent_usd <= 0:
+            for ot in token_transfers:
+                omint = ot.get("mint")
+                if omint == mint:
+                    continue
+                oval = float(ot.get("tokenAmount", 0) or 0)
+                if oval <= 0:
+                    continue
+                sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
+                if sym in STABLE_SYMBOLS and oval > spent_usd:
+                    spent_usd = oval
+                    spent_value = oval
+                    spent_symbol = sym
+                elif (omint == WSOL_MINT or sym == "WSOL") and oval > spent_sol:
+                    spent_sol = oval
+                    spent_value = oval
+                    spent_symbol = "SOL"
 
         if spent_sol <= 0 and spent_usd <= 0:
             return None
