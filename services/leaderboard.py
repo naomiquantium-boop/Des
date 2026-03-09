@@ -56,22 +56,25 @@ class LeaderboardUpdater:
         labels: dict[str, str] = {}
         chart_urls: dict[str, str | None] = {}
         mcaps: dict[str, float | None] = {}
+        all_mints: set[str] = set(metrics.keys())
         for row in tracked:
             labels[row['mint']] = row['label']
+            all_mints.add(row['mint'])
             if row['force_trending'] or row['force_leaderboard'] or (row['trend_until_ts'] or 0) > now:
                 metrics[row['mint']] = max(metrics.get(row['mint'], 0.0), 1.0)
 
-        for mint in list(metrics.keys()):
-            if mint not in labels:
-                try:
-                    meta = await fetch_token_meta(mint)
-                    labels[mint] = meta.get('symbol') or meta.get('name') or mint[:6]
-                    chart_urls[mint] = meta.get('dexUrl')
-                    mcaps[mint] = meta.get('mcapUsd')
-                except Exception:
-                    labels[mint] = mint[:6]
-                    chart_urls[mint] = None
-                    mcaps[mint] = None
+        # Always fetch token meta for leaderboard rows so the middle value is market cap,
+        # not recent buy volume, and so the DexScreener link is available.
+        for mint in list(all_mints):
+            try:
+                meta = await fetch_token_meta(mint)
+                labels[mint] = meta.get('symbol') or meta.get('name') or labels.get(mint) or mint[:6]
+                chart_urls[mint] = meta.get('dexUrl')
+                mcaps[mint] = meta.get('mcapUsd')
+            except Exception:
+                labels[mint] = labels.get(mint) or mint[:6]
+                chart_urls[mint] = chart_urls.get(mint)
+                mcaps[mint] = mcaps.get(mint)
 
         ordered = sorted(metrics.items(), key=lambda kv: kv[1], reverse=True)[:10]
         rows: List[Tuple[int, str, str, float, str | None]] = []
@@ -88,19 +91,19 @@ class LeaderboardUpdater:
         text = build_leaderboard_message(rows, footer_handle)
         mid = await self._get_kv(conn, "leaderboard_message_id")
         if not mid:
-            msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+            msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
             await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
         else:
             try:
-                await self.bot.edit_message_text(text=text, chat_id=settings.POST_CHANNEL, message_id=int(mid), reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                await self.bot.edit_message_text(text=text, chat_id=settings.POST_CHANNEL, message_id=int(mid), reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
             except TelegramBadRequest as e:
                 if "message is not modified" in str(e).lower():
                     await conn.close()
                     return
-                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
             except Exception:
-                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True)
+                msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
         await conn.close()
 

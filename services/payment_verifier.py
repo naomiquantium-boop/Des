@@ -28,7 +28,7 @@ async def verify_sol_transfer(
 ) -> PaymentResult:
     tx = await rpc.get_transaction(signature)
     if not tx:
-        return PaymentResult(False, "Transaction not found (yet). Try again in 10 seconds.")
+        return PaymentResult(False, 'Transaction not found yet. Try again in 10 seconds.')
     block_time = tx.get("blockTime")
     if block_time and int(time.time()) - int(block_time) > max_age_sec:
         return PaymentResult(False, "Transaction is too old.")
@@ -49,7 +49,7 @@ async def verify_sol_transfer(
                 amount_sol = _lamports_to_sol(lamports)
                 if amount_sol + 1e-9 >= min_amount_sol:
                     return PaymentResult(True, "Payment verified.", amount_sol=amount_sol, timestamp=block_time, signature=signature)
-    return PaymentResult(False, f"Payment not found. Send at least {min_amount_sol} SOL to {expected_to}.", amount_sol=amount_sol, timestamp=block_time)
+    return PaymentResult(False, f'Payment not detected for this invoice. Send at least {min_amount_sol:g} SOL to the invoice wallet.', amount_sol=amount_sol, timestamp=block_time)
 
 
 async def find_recent_payment(

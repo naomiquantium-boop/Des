@@ -300,8 +300,10 @@ class BuyWatcher:
 
         # Post to channel ONCE if:
         # - channel is configured AND
-        # - token is either configured in a group OR owner-added for channel-only mode.
-        if settings.POST_CHANNEL and (tgt.get("groups") or tgt.get("post_channel")):
+        # - token is either configured in a group OR owner-added for channel-only mode AND
+        # - the buy meets at least the hard channel minimum of 0.25 SOL.
+        channel_min_buy = max(0.25, float(settings.MIN_BUY_DEFAULT_SOL), float(token_cfg.get("min_buy") or 0))
+        if settings.POST_CHANNEL and (tgt.get("groups") or tgt.get("post_channel")) and spent_sol >= channel_min_buy:
             try:
                 await self.bot.send_message(
                     settings.POST_CHANNEL,
