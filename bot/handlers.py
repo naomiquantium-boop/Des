@@ -680,21 +680,6 @@ async def invoice_refresh(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
     await cq.answer(message, show_alert=True)
 
 
-@router.message()
-async def txhash_fallback(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
-    text = (msg.text or '').strip()
-    if len(text) < 32 or ' ' in text or text.startswith('/'):
-        return
-    cur_state = await state.get_state()
-    if cur_state == InvoiceFlow.txhash.state:
-        return
-    invoice_id = await _latest_pending_invoice_for_user(db, msg.from_user.id)
-    if not invoice_id:
-        return
-    await state.set_state(InvoiceFlow.txhash)
-    await state.update_data(invoice_id=invoice_id)
-    await invoice_txhash_submit(msg, state, db, rpc)
-
 @router.message(Command("whoami"))
 async def whoami(msg: Message):
     uid = msg.from_user.id if msg.from_user else 'unknown'
@@ -762,3 +747,20 @@ async def status(msg: Message, db: DB):
     pending = (await cur.fetchone())[0]
     await conn.close()
     await msg.reply(f"Tracked tokens: {tokens}\nPending invoices: {pending}")
+
+
+@router.message()
+async def txhash_fallback(msg: Message, state: FSMContext, db: DB, rpc: SolanaRPC):
+    text = (msg.text or '').strip()
+    if len(text) < 32 or ' ' in text or text.startswith('/'):
+        return
+    cur_state = await state.get_state()
+    if cur_state == InvoiceFlow.txhash.state:
+        return
+    invoice_id = await _latest_pending_invoice_for_user(db, msg.from_user.id)
+    if not invoice_id:
+        return
+    await state.set_state(InvoiceFlow.txhash)
+    await state.update_data(invoice_id=invoice_id)
+    await invoice_txhash_submit(msg, state, db, rpc)
+
