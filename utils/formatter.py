@@ -58,12 +58,13 @@ def _ad_line(ad_text: str | None, ad_link: str | None = None) -> str:
     return _default_ad_line()
 
 
-def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url, price_usd, mcap_usd, tg_url, ad_text, ad_link, chart_url=None):
+def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url, price_usd, mcap_usd, tg_url, ad_text, ad_link, chart_url=None, spent_symbol="SOL", spent_value=None):
     title = f'🪐 {_a(token_symbol, tg_url)} Buy!'
     count = max(3, min(12, int(spent_sol * 4) or 3))
+    display_value = spent_value if spent_value is not None else spent_sol
     usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
     lines = [title, "", emoji_bar(emoji, count), ""]
-    lines.append(f"💵 {fmt_num(spent_sol, 2)} SOL{usd_part}")
+    lines.append(f"💵 {fmt_num(display_value, 2)} {spent_symbol}{usd_part}")
     lines.append(f"🔁 {fmt_num(got_tokens, 2)} {_a(token_symbol, tg_url)}")
     lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
     if price_usd is not None:
@@ -87,12 +88,14 @@ def build_buy_message_channel(**kwargs) -> str:
 
 def build_leaderboard_message(rows: list[tuple[int, str, str, float, str | None]], footer_handle: str) -> str:
     lines = ["🟢 PUMPTOOLS TRENDING", ""]
-    for row in rows[:10]:
+    for idx, row in enumerate(rows[:10], start=1):
         rank, label, metric, pct, chart_url = row
         sign = "+" if pct > 0 else ""
         token_part = _a(label, chart_url or settings.LISTING_URL)
         metric_part = _a(metric, chart_url or settings.LISTING_URL)
         lines.append(f'{RANK_EMOJIS.get(rank, str(rank))} {token_part} | {metric_part} | {sign}{pct:.0f}%')
+        if idx == 3:
+            lines.append("────────────────────")
     lines.append("")
     lines.append(f"<blockquote>💬 To trend add {footer_handle} in your group</blockquote>")
     return "\n".join(lines)
