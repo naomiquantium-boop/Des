@@ -34,7 +34,7 @@ class Settings(BaseModel):
     ADS_3D_PRICE_SOL: float = float(_get("ADS_3D_PRICE_SOL", "4.8"))
     ADS_7D_PRICE_SOL: float = float(_get("ADS_7D_PRICE_SOL", "10"))
 
-    POLL_INTERVAL_SEC: int = int(_get("POLL_INTERVAL_SEC", "4"))
+    POLL_INTERVAL_SEC: int = int(_get("POLL_INTERVAL_SEC", "2"))
     MIN_BUY_DEFAULT_SOL: float = float(_get("MIN_BUY_DEFAULT_SOL", "0.25"))
 
     JUPITER_PRICE_URL: str = _get("JUPITER_PRICE_URL", "https://price.jup.ag/v6/price?ids=SOL")
