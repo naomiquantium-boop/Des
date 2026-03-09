@@ -53,7 +53,30 @@ ADS_PRICES = {
 }
 
 def _is_owner(obj: Message | CallbackQuery) -> bool:
-    return bool(obj.from_user and obj.from_user.id == settings.OWNER_ID)
+    return bool(obj.from_user and int(obj.from_user.id) == int(settings.OWNER_ID))
+
+async def _ensure_owner(msg: Message) -> bool:
+    if _is_owner(msg):
+        return True
+    uid = msg.from_user.id if msg.from_user else 'unknown'
+    await msg.reply(f"❌ Owner command failed. Your Telegram ID is: <code>{uid}</code>\nSet Railway <code>OWNER_ID</code> to this exact number, then redeploy.", parse_mode='HTML')
+    return False
+
+def _parse_forceadd_args(raw: str) -> tuple[str, str | None]:
+    raw = (raw or '').strip()
+    if not raw:
+        return '', None
+    if '|' in raw:
+        a,b = raw.split('|',1)
+        return a.strip(), _norm_tg(b.strip()) if b.strip() else None
+    parts = raw.split()
+    mint = parts[0]
+    tg = None
+    for item in parts[1:]:
+        if item.startswith('http://') or item.startswith('https://') or item.startswith('t.me/') or item.startswith('@'):
+            tg = _norm_tg(item)
+            break
+    return mint, tg
 
 
 
@@ -672,6 +695,11 @@ async def txhash_fallback(msg: Message, state: FSMContext, db: DB, rpc: SolanaRP
     await state.update_data(invoice_id=invoice_id)
     await invoice_txhash_submit(msg, state, db, rpc)
 
+@router.message(Command("whoami"))
+async def whoami(msg: Message):
+    uid = msg.from_user.id if msg.from_user else 'unknown'
+    await msg.reply(f"Your Telegram ID: <code>{uid}</code>", parse_mode='HTML')
+
 @router.message(Command("tokens"))
 async def tokens_cmd(msg: Message, db: DB):
     rows = await _tokens(db)
@@ -682,17 +710,22 @@ async def tokens_cmd(msg: Message, db: DB):
 
 @router.message(Command("forceadd"))
 async def forceadd(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg) or not command.args:
+    if not await _ensure_owner(msg):
         return
-    parts = [p.strip() for p in command.args.split("|", 1)]
-    mint = parts[0]
-    tg = _norm_tg(parts[1]) if len(parts) > 1 else None
+    if not command.args:
+        return await msg.reply("Usage:
+<code>/forceadd MINT|https://t.me/yourlink</code>
+Or:
+<code>/forceadd MINT https://t.me/yourlink</code>", parse_mode='HTML')
+    mint, tg = _parse_forceadd_args(command.args)
+    if not mint:
+        return await msg.reply("❌ Missing token mint.")
     meta = await _upsert_tracked_token(db, mint, tg)
     await msg.reply(f"✅ Token added: {meta.get('symbol') or meta.get('name') or mint[:6]}")
 
 @router.message(Command("forcetrending"))
 async def forcetrending(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg) or not command.args:
+    if not await _ensure_owner(msg) or not command.args:
         return
     parts = command.args.split()
     mint = parts[0]
@@ -704,7 +737,7 @@ async def forcetrending(msg: Message, command: CommandObject, db: DB):
 
 @router.message(Command("forceleaderboard"))
 async def forceleaderboard(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg) or not command.args:
+    if not await _ensure_owner(msg) or not command.args:
         return
     mint = command.args.strip().split()[0]
     conn = await db.connect()
@@ -714,7 +747,7 @@ async def forceleaderboard(msg: Message, command: CommandObject, db: DB):
 
 @router.message(Command("setglobalad"))
 async def setglobalad(msg: Message, command: CommandObject, db: DB):
-    if not _is_owner(msg) or not command.args:
+    if not await _ensure_owner(msg) or not command.args:
         return
     conn = await db.connect(); ads = AdsService(conn)
     await ads.set_owner_fallback(command.args.strip())
@@ -723,7 +756,7 @@ async def setglobalad(msg: Message, command: CommandObject, db: DB):
 
 @router.message(Command("status"))
 async def status(msg: Message, db: DB):
-    if not _is_owner(msg):
+    if not await _ensure_owner(msg):
         return
     conn = await db.connect()
     cur = await conn.execute("SELECT COUNT(*) FROM tracked_tokens")
