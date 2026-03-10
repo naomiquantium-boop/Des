@@ -181,6 +181,7 @@ class BuyWatcher:
         self.db = db
         self.rpc = rpc
         self.helius = HeliusClient(settings.HELIUS_API_KEY) if settings.HELIUS_API_KEY else None
+        self._helius_disabled = False
         self._running = False
         self._last_sol_price = 100.0
         self._chat_type_cache: Dict[int, str] = {}
@@ -228,36 +229,44 @@ class BuyWatcher:
 
     async def run_forever(self):
         self._running = True
+        print("[buy_watcher] started", flush=True)
         while self._running:
             try:
                 await self.tick()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[buy_watcher] tick failed: {e}", flush=True)
             await asyncio.sleep(settings.POLL_INTERVAL_SEC)
 
     async def _fetch_events(self, mint: str, last_sig: str | None):
         events = []
         newest_sig = None
-        # Prefer Helius if configured and healthy.
-        if self.helius:
+        # Prefer Helius if configured and healthy, but permanently fall back to RPC
+        # once Helius starts failing or returning no usable data.
+        if self.helius and not self._helius_disabled:
             try:
                 txs = await self.helius.get_address_txs(mint, limit=10)
-                for tx in txs:
-                    sig = tx.get("signature")
-                    if not sig:
-                        continue
-                    if newest_sig is None:
-                        newest_sig = sig
-                    if sig == last_sig:
-                        break
-                    ev = _find_buy_in_tx(tx, mint)
-                    if ev:
-                        events.append(ev)
-                return list(reversed(events)), newest_sig
-            except Exception:
-                pass
+                if txs:
+                    for tx in txs:
+                        sig = tx.get("signature")
+                        if not sig:
+                            continue
+                        if newest_sig is None:
+                            newest_sig = sig
+                        if sig == last_sig:
+                            break
+                        ev = _find_buy_in_tx(tx, mint)
+                        if ev:
+                            events.append(ev)
+                    return list(reversed(events)), newest_sig
+                else:
+                    print(f"[buy_watcher] helius returned empty for {mint}; switching to rpc fallback", flush=True)
+                    self._helius_disabled = True
+            except Exception as e:
+                print(f"[buy_watcher] helius failed for {mint}: {e}; switching to rpc fallback", flush=True)
+                self._helius_disabled = True
         # Fallback to plain RPC / Alchemy.
         try:
+            print(f"[buy_watcher] using rpc fallback for {mint}", flush=True)
             sigs = await self.rpc.get_signatures_for_address(mint, limit=10)
             collected = []
             for item in sigs:
@@ -275,7 +284,8 @@ class BuyWatcher:
                 if ev:
                     collected.append(ev)
             return list(reversed(collected)), newest_sig
-        except Exception:
+        except Exception as e:
+            print(f"[buy_watcher] rpc fallback failed for {mint}: {e}", flush=True)
             return [], newest_sig
 
     async def tick(self):
