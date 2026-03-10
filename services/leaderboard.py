@@ -105,7 +105,10 @@ class LeaderboardUpdater:
 
         footer_handle = f"@{settings.BOT_USERNAME}"
         text = build_leaderboard_message(rows, footer_handle)
-        mid = await self._get_kv(conn, "leaderboard_message_id")
+        fixed_mid = int(getattr(settings, "LEADERBOARD_MESSAGE_ID", 0) or 0)
+        if fixed_mid:
+            await self._set_kv(conn, "leaderboard_message_id", str(fixed_mid))
+        mid = str(fixed_mid) if fixed_mid else await self._get_kv(conn, "leaderboard_message_id")
         if not mid:
             msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
             await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
@@ -113,12 +116,19 @@ class LeaderboardUpdater:
             try:
                 await self.bot.edit_message_text(text=text, chat_id=settings.POST_CHANNEL, message_id=int(mid), reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
             except TelegramBadRequest as e:
-                if "message is not modified" in str(e).lower():
+                err = str(e).lower()
+                if "message is not modified" in err:
+                    await conn.close()
+                    return
+                if fixed_mid:
                     await conn.close()
                     return
                 msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
             except Exception:
+                if fixed_mid:
+                    await conn.close()
+                    return
                 msg = await self.bot.send_message(settings.POST_CHANNEL, text, reply_markup=leaderboard_kb(), disable_web_page_preview=True, parse_mode="HTML")
                 await self._set_kv(conn, "leaderboard_message_id", str(msg.message_id))
         await conn.close()
