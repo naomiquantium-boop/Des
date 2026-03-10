@@ -15,13 +15,13 @@ class Settings(BaseModel):
     BOT_USERNAME: str = _get("BOT_USERNAME", "PumpToolsBuyBot")
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
+    LEADERBOARD_MESSAGE_ID: int = int(_get("LEADERBOARD_MESSAGE_ID", "0"))
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 
     SOLANA_RPC: str = os.getenv("SOLANA_RPC_URL") or _get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
     SOLANA_WS: str = os.getenv("SOLANA_WS_URL") or _get("SOLANA_WS", "wss://api.mainnet-beta.solana.com")
     HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "")
-    USE_HELIUS: bool = os.getenv("USE_HELIUS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
     PAYMENT_WALLET: str = _get("PAYMENT_WALLET")
     TRENDING_1H_PRICE_SOL: float = float(_get("TRENDING_1H_PRICE_SOL", "0.5"))
