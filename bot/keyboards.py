@@ -9,7 +9,7 @@ BUY_TEMPLATE = "https://t.me/ThorSolana_bot?start=r-TBw15MO-buy-{mint}"
 def buy_kb(mint: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="Metrics", url=BUY_TEMPLATE.format(mint=mint))
-    kb.button(text="Trending", url=settings.TRENDING_URL)
+    kb.button(text="Trending", url=settings.LISTING_URL)
     kb.adjust(2)
     return kb.as_markup()
 
