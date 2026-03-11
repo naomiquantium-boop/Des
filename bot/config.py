@@ -15,6 +15,7 @@ class Settings(BaseModel):
     BOT_USERNAME: str = _get("BOT_USERNAME", "PumpToolsBuyBot")
     POST_CHANNEL: str = _get("POST_CHANNEL", "@PumpToolsTrending")
     LISTING_URL: str = _get("LISTING_URL", "https://t.me/PumpToolsListing")
+    TRENDING_URL: str = _get("TRENDING_URL", "https://t.me/PumpToolsTrending")
     LEADERBOARD_MESSAGE_ID: int = int(_get("LEADERBOARD_MESSAGE_ID", "0"))
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
