@@ -723,6 +723,14 @@ async def invoice_refresh(cq: CallbackQuery, db: DB, rpc: SolanaRPC):
     await cq.answer(message, show_alert=True)
 
 
+
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.text.func(lambda t: (t or "").strip().lower() == "ca"))
+async def send_group_token_ca(msg: Message, db: DB):
+    mint = await _group_token(db, msg.chat.id)
+    if not mint:
+        return await msg.reply("No token contract address is set for this group yet.")
+    await msg.reply(f"<code>{mint}</code>", parse_mode="HTML", disable_web_page_preview=True)
+
 @router.message(Command("whoami"))
 async def whoami(msg: Message):
     uid = msg.from_user.id if msg.from_user else 'unknown'
