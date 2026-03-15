@@ -294,6 +294,14 @@ class BuyWatcher:
         for mint, tgt in targets.items():
             last_sig = await self._get_last_sig(conn, mint)
             new_events, newest_sig = await self._fetch_events(mint, last_sig)
+
+            # First time seeing a token: initialize the cursor to the newest
+            # signature and do not replay historical buys into the chat.
+            if last_sig is None:
+                if newest_sig:
+                    await self._set_last_sig(conn, mint, newest_sig)
+                continue
+
             if newest_sig and newest_sig != last_sig and not new_events:
                 await self._set_last_sig(conn, mint, newest_sig)
             for ev in new_events:

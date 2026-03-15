@@ -47,6 +47,20 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         except Exception:
             return 0.0
 
+    def _net_native_spend(senders: list[str]) -> float:
+        lamports = 0
+        for nt in native_transfers:
+            frm = nt.get("fromUserAccount")
+            to = nt.get("toUserAccount")
+            amt = int(nt.get("amount", 0) or 0)
+            if amt <= 0:
+                continue
+            if frm in senders:
+                lamports += amt
+            if to in senders:
+                lamports -= amt
+        return max(0.0, lamports / 1_000_000_000)
+
     # Helius enhanced swap format
     try:
         token_inputs = swap.get("tokenInputs") or []
@@ -66,14 +80,9 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 spent_value = 0.0
                 spent_symbol = "SOL"
 
-                # native input first
-                lamports = _fa(native_input.get("amount"))
-                if lamports > 0:
-                    spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
-                    spent_value = spent_sol
-                    spent_symbol = "SOL"
-
-                # then token inputs (USDC/USDT/WSOL usually here)
+                # Prefer exact token inputs first (USDC/USDT/WSOL).
+                # For native SOL swaps, use net native transfers before trusting
+                # swap.nativeInput because some routes overfund and refund change.
                 for item in token_inputs:
                     imint = item.get("mint")
                     if imint == mint:
@@ -91,6 +100,20 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                             spent_sol = val
                             spent_value = val
                             spent_symbol = "SOL"
+
+                if spent_usd <= 0 and spent_sol <= 0:
+                    net_native = _net_native_spend([buyer, fee_payer] if fee_payer else [buyer])
+                    if net_native > 0:
+                        spent_sol = net_native
+                        spent_value = net_native
+                        spent_symbol = "SOL"
+
+                if spent_usd <= 0 and spent_sol <= 0:
+                    lamports = _fa(native_input.get("amount"))
+                    if lamports > 0:
+                        spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
+                        spent_value = spent_sol
+                        spent_symbol = "SOL"
 
                 if spent_sol > 0 or spent_usd > 0:
                     return {
@@ -125,12 +148,8 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         spent_usd = 0.0
         spent_value = 0.0
         spent_symbol = "SOL"
-        spent_lamports = 0
-        for nt in native_transfers:
-            if nt.get("fromUserAccount") in senders:
-                spent_lamports += int(nt.get("amount", 0) or 0)
-        if spent_lamports > 0:
-            spent_sol = spent_lamports / 1_000_000_000
+        spent_sol = _net_native_spend(senders)
+        if spent_sol > 0:
             spent_value = spent_sol
             spent_symbol = "SOL"
         for ot in token_transfers:
