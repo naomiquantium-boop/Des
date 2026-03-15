@@ -120,6 +120,18 @@ async def _group_token(db: DB, group_id: int) -> str | None:
     await conn.close()
     return row[0] if row else None
 
+async def _group_token_entry(db: DB, group_id: int) -> tuple[str, str] | None:
+    conn = await db.connect()
+    cur = await conn.execute(
+        "SELECT g.token_mint, COALESCE(t.symbol, t.name, g.token_mint) AS label FROM group_settings g LEFT JOIN tracked_tokens t ON t.mint=g.token_mint WHERE g.group_id=? AND g.is_active=1",
+        (group_id,),
+    )
+    row = await cur.fetchone()
+    await conn.close()
+    if not row:
+        return None
+    return (row["token_mint"], row["label"])
+
 
 async def _latest_pending_invoice_for_user(db: DB, user_id: int):
     conn = await db.connect()
@@ -475,13 +487,28 @@ async def menu_group(cq: CallbackQuery):
 @router.callback_query(F.data == "menu:advert")
 async def advert_menu(cq: CallbackQuery, db: DB, state: FSMContext):
     await state.clear()
+    if cq.message and cq.message.chat.type in ("group", "supergroup"):
+        group_token = await _group_token_entry(db, cq.message.chat.id)
+        if not group_token:
+            await cq.message.answer("No active token is set for this group. Use ➕ Add Token first.")
+        else:
+            mint, label = group_token
+            await cq.message.answer(
+                f"💎 Advertise your token\nPromote your token to millions of users across thousands of groups.\n\nThis booking will use this group's token only:\n<b>{label}</b>",
+                parse_mode="HTML",
+                reply_markup=token_list_kb([(mint, label)], "adtoken", back="menu:home"),
+            )
+        await cq.answer()
+        return
     tokens = await _tokens(db)
     if not tokens:
         await cq.message.answer("No tracked tokens yet. Use ➕ Add Token first.")
     else:
-        await cq.message.answer("💎 Advertise your token\nPromote your token to millions of users across thousands of groups.\n\nSelect your token to continue.", reply_markup=token_list_kb(tokens, "adtoken", back="menu:home"))
+        await cq.message.answer(
+            "💎 Advertise your token\nPromote your token to millions of users across thousands of groups.\n\nSelect your token to continue.",
+            reply_markup=token_list_kb(tokens, "adtoken", back="menu:home"),
+        )
     await cq.answer()
-
 @router.callback_query(F.data.startswith("adtoken:"))
 async def advert_pick_token(cq: CallbackQuery, state: FSMContext):
     mint = cq.data.split(":", 1)[1]
@@ -541,13 +568,29 @@ async def advert_duration_text(msg: Message, state: FSMContext, db: DB, rpc: Sol
 @router.callback_query(F.data == "menu:trending")
 async def trending_menu(cq: CallbackQuery, db: DB, state: FSMContext):
     await state.clear()
+    if cq.message and cq.message.chat.type in ("group", "supergroup"):
+        group_token = await _group_token_entry(db, cq.message.chat.id)
+        if not group_token:
+            await cq.message.answer("No active token is set for this group. Use ➕ Add Token first.")
+        else:
+            mint, label = group_token
+            await cq.message.answer(
+                f"<blockquote>Your token will be shown here:\n@PumpToolsTrending.\nChoose how many hours you want your token to trend.</blockquote>\n\n🎉 This booking will use this group's token only:\n<b>{label}</b>",
+                parse_mode="HTML",
+                reply_markup=token_list_kb([(mint, label)], "trendtoken", back="menu:home"),
+            )
+        await cq.answer()
+        return
     tokens = await _tokens(db)
     if not tokens:
         await cq.message.answer("No tracked tokens yet. Use ➕ Add Token first.")
     else:
-        await cq.message.answer("<blockquote>Your token will be shown here:\n@PumpToolsTrending.\nChoose how many hours you want your token to trend.</blockquote>\n\n🎉 Hi, please select your token below.", parse_mode="HTML", reply_markup=token_list_kb(tokens, "trendtoken", back="menu:home"))
+        await cq.message.answer(
+            "<blockquote>Your token will be shown here:\n@PumpToolsTrending.\nChoose how many hours you want your token to trend.</blockquote>\n\n🎉 Hi, please select your token below.",
+            parse_mode="HTML",
+            reply_markup=token_list_kb(tokens, "trendtoken", back="menu:home"),
+        )
     await cq.answer()
-
 @router.callback_query(F.data.startswith("trendtoken:"))
 async def trending_pick_token(cq: CallbackQuery, state: FSMContext):
     mint = cq.data.split(":", 1)[1]
