@@ -182,7 +182,7 @@ class BuyWatcher:
         self.rpc = rpc
         self.helius = HeliusClient(settings.HELIUS_API_KEY) if settings.HELIUS_API_KEY else None
         self._running = False
-        self._last_sol_price = 100.0
+        self._last_sol_price = 0.0
         self._chat_type_cache: Dict[int, str] = {}
 
     async def _chat_type(self, chat_id: int) -> str:
@@ -324,16 +324,37 @@ class BuyWatcher:
         # For SOL buys, using token price * amount can drift from the real swap
         # because token metadata is often stale/rounded. Use exact SOL spent first,
         # then convert that to USD using the current cached SOL price only as a fallback.
+        meta_price_usd = None
+        try:
+            if meta.get("priceUsd") is not None:
+                meta_price_usd = float(meta.get("priceUsd"))
+        except Exception:
+            meta_price_usd = None
+
+        implied_usd = (meta_price_usd * got_tokens) if (meta_price_usd and got_tokens) else 0.0
+        live_sol_price = float(sol_price or self._last_sol_price or 0.0)
+
         if direct_spent_usd > 0:
             spent_usd = direct_spent_usd
-        elif spent_symbol == "SOL" and spent_sol > 0:
-            spent_usd = spent_sol * (sol_price or self._last_sol_price or 0.0)
-        elif meta.get("priceUsd") is not None and got_tokens:
-            spent_usd = float(meta.get("priceUsd")) * got_tokens
+        elif spent_symbol == "SOL" and spent_sol > 0 and live_sol_price > 0:
+            spent_usd = spent_sol * live_sol_price
+        elif implied_usd > 0:
+            spent_usd = implied_usd
         else:
             spent_usd = 0.0
 
-        effective_spent_sol = spent_sol or ((spent_usd / sol_price) if spent_usd and sol_price else (spent_usd / self._last_sol_price if spent_usd and self._last_sol_price else 0.0))
+        # If the SOL-derived USD looks clearly wrong, prefer the token-side implied USD.
+        # This prevents cases where a stale SOL/USD cache or wrap/rent overhead makes
+        # the posted buy amount much larger than the actual swap shown on explorers.
+        if spent_symbol == "SOL" and spent_sol > 0 and live_sol_price > 0 and implied_usd > 0:
+            derived_usd = spent_sol * live_sol_price
+            drift = abs(derived_usd - implied_usd) / max(implied_usd, 1e-9)
+            if drift > 0.12:
+                spent_usd = implied_usd
+                if live_sol_price > 0:
+                    spent_sol = implied_usd / live_sol_price
+
+        effective_spent_sol = spent_sol or ((spent_usd / live_sol_price) if spent_usd and live_sol_price else 0.0)
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
         if effective_spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
