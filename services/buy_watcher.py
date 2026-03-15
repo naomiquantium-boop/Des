@@ -320,7 +320,19 @@ class BuyWatcher:
         direct_spent_usd = float(ev.get("spent_usd") or 0.0)
         spent_symbol = ev.get("spent_symbol") or "SOL"
         spent_value = float(ev.get("spent_value") or 0.0)
-        spent_usd = direct_spent_usd or ((float(meta.get("priceUsd")) * got_tokens) if meta.get("priceUsd") is not None and got_tokens else (spent_sol * sol_price if sol_price and spent_sol else 0.0))
+        # Prefer the transaction-derived spend over derived estimates.
+        # For SOL buys, using token price * amount can drift from the real swap
+        # because token metadata is often stale/rounded. Use exact SOL spent first,
+        # then convert that to USD using the current cached SOL price only as a fallback.
+        if direct_spent_usd > 0:
+            spent_usd = direct_spent_usd
+        elif spent_symbol == "SOL" and spent_sol > 0:
+            spent_usd = spent_sol * (sol_price or self._last_sol_price or 0.0)
+        elif meta.get("priceUsd") is not None and got_tokens:
+            spent_usd = float(meta.get("priceUsd")) * got_tokens
+        else:
+            spent_usd = 0.0
+
         effective_spent_sol = spent_sol or ((spent_usd / sol_price) if spent_usd and sol_price else (spent_usd / self._last_sol_price if spent_usd and self._last_sol_price else 0.0))
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
