@@ -24,6 +24,24 @@ def fmt_num(x: float, decimals: int = 2) -> str:
         return str(x)
 
 
+def fmt_spent_amount(value: float, symbol: str) -> str:
+    try:
+        v = float(value or 0)
+    except Exception:
+        v = 0.0
+    sym = (symbol or '').upper()
+    if sym == 'SOL':
+        # Show more precision for SOL so swaps around 1 SOL don't all appear as 1.00.
+        if v < 1:
+            d = 4
+        elif v < 10:
+            d = 3
+        else:
+            d = 2
+        return fmt_num(v, d)
+    return fmt_num(v, 2)
+
+
 def _norm_url(url: Optional[str]) -> Optional[str]:
     if not url:
         return None
@@ -64,7 +82,7 @@ def _build(token_symbol, emoji, spent_sol, spent_usd, got_tokens, buyer, tx_url,
     display_value = spent_value if spent_value is not None else spent_sol
     usd_part = f" (${fmt_num(spent_usd, 2)})" if spent_usd > 0 else ""
     lines = [title, "", emoji_bar(emoji, count), ""]
-    lines.append(f"💵 {fmt_num(display_value, 2)} {spent_symbol}{usd_part}")
+    lines.append(f"💵 {fmt_spent_amount(display_value, spent_symbol)} {spent_symbol}{usd_part}")
     lines.append(f"🔁 {fmt_num(got_tokens, 2)} {_a(token_symbol, tg_url)}")
     lines.append(f"👤 {_a(short_addr(buyer), tx_url)}: New! | {_a('Txn', tx_url)}")
     if price_usd is not None:
