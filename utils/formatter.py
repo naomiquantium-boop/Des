@@ -31,15 +31,16 @@ def fmt_spent_amount(value: float, symbol: str) -> str:
         v = 0.0
     sym = (symbol or '').upper()
     if sym == 'SOL':
-        # Show more precision for SOL so swaps around 1 SOL don't all appear as 1.00.
-        if v < 1:
+        if v < 10:
             d = 4
-        elif v < 10:
+        elif v < 100:
             d = 3
         else:
             d = 2
         return fmt_num(v, d)
-    return fmt_num(v, 2)
+    if sym in {'USDC', 'USDT'}:
+        return fmt_num(v, 4 if v < 1000 else 2)
+    return fmt_num(v, 4 if abs(v) < 1000 else 2)
 
 
 def _norm_url(url: Optional[str]) -> Optional[str]:
