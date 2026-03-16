@@ -31,7 +31,9 @@ def fmt_spent_amount(value: float, symbol: str) -> str:
         v = 0.0
     sym = (symbol or '').upper()
     if sym == 'SOL':
-        if v < 10:
+        if v < 1:
+            d = 6
+        elif v < 10:
             d = 4
         elif v < 100:
             d = 3
