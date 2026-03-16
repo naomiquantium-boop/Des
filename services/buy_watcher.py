@@ -255,10 +255,12 @@ class BuyWatcher:
     async def _fetch_events(self, mint: str, last_sig: str | None):
         events = []
         newest_sig = None
-        # Prefer Helius if configured and healthy.
+        # Prefer Helius if configured and healthy, but always verify each buy against
+        # the parsed RPC transaction before posting. Helius can pick route-internal swap
+        # legs on aggregator trades, which makes the amount drift from Solscan.
         if self.helius:
             try:
-                txs = await self.helius.get_address_txs(mint, limit=10)
+                txs = await self.helius.get_address_txs(mint, limit=25)
                 for tx in txs:
                     sig = tx.get("signature")
                     if not sig:
@@ -268,29 +270,47 @@ class BuyWatcher:
                     if sig == last_sig:
                         break
                     ev = _find_buy_in_tx(tx, mint)
-                    if ev:
-                        events.append(ev)
+                    if not ev:
+                        continue
+                    try:
+                        parsed_tx = await self.rpc.get_transaction(sig)
+                    except Exception:
+                        parsed_tx = None
+                    if parsed_tx:
+                        rpc_ev = _find_buy_in_rpc_tx(parsed_tx, mint)
+                        if rpc_ev:
+                            # Keep RPC parsed amounts as source of truth when available.
+                            ev.update({k: v for k, v in rpc_ev.items() if v not in (None, "")})
+                    events.append(ev)
                 return list(reversed(events)), newest_sig
             except Exception:
                 pass
-        # Fallback to plain RPC / Alchemy.
+        # Fallback to plain RPC / Alchemy with a slightly deeper window so bursts do not
+        # skip buys between polls.
         try:
-            sigs = await self.rpc.get_signatures_for_address(mint, limit=10)
+            before = None
             collected = []
-            for item in sigs:
-                sig = item.get("signature")
-                if not sig:
-                    continue
-                if newest_sig is None:
-                    newest_sig = sig
-                if sig == last_sig:
+            for _ in range(3):
+                sigs = await self.rpc.get_signatures_for_address(mint, limit=25, before=before)
+                if not sigs:
                     break
-                tx = await self.rpc.get_transaction(sig)
-                if not tx:
-                    continue
-                ev = _find_buy_in_rpc_tx(tx, mint)
-                if ev:
-                    collected.append(ev)
+                for item in sigs:
+                    sig = item.get("signature")
+                    if not sig:
+                        continue
+                    if newest_sig is None:
+                        newest_sig = sig
+                    if sig == last_sig:
+                        return list(reversed(collected)), newest_sig
+                    tx = await self.rpc.get_transaction(sig)
+                    if not tx:
+                        continue
+                    ev = _find_buy_in_rpc_tx(tx, mint)
+                    if ev:
+                        collected.append(ev)
+                before = sigs[-1].get("signature")
+                if not before:
+                    break
             return list(reversed(collected)), newest_sig
         except Exception:
             return [], newest_sig
@@ -337,10 +357,8 @@ class BuyWatcher:
         direct_spent_usd = float(ev.get("spent_usd") or 0.0)
         spent_symbol = ev.get("spent_symbol") or "SOL"
         spent_value = float(ev.get("spent_value") or 0.0)
-        # Prefer the transaction-derived spend over derived estimates.
-        # For SOL buys, using token price * amount can drift from the real swap
-        # because token metadata is often stale/rounded. Use exact SOL spent first,
-        # then convert that to USD using the current cached SOL price only as a fallback.
+        # Trust the parsed transaction spend first. Do not rewrite the input amount from
+        # token-side price estimates, because that is what makes posts drift from Solscan.
         meta_price_usd = None
         try:
             if meta.get("priceUsd") is not None:
@@ -355,25 +373,23 @@ class BuyWatcher:
             spent_usd = direct_spent_usd
         elif spent_symbol == "SOL" and spent_sol > 0 and live_sol_price > 0:
             spent_usd = spent_sol * live_sol_price
+        elif spent_symbol in ("USDC", "USDT") and spent_value > 0:
+            spent_usd = spent_value
         elif implied_usd > 0:
             spent_usd = implied_usd
         else:
             spent_usd = 0.0
 
-        # If the SOL-derived USD looks clearly wrong, prefer the token-side implied USD.
-        # This prevents cases where a stale SOL/USD cache or wrap/rent overhead makes
-        # the posted buy amount much larger than the actual swap shown on explorers.
-        if spent_symbol == "SOL" and spent_sol > 0 and live_sol_price > 0 and implied_usd > 0:
-            derived_usd = spent_sol * live_sol_price
-            drift = abs(derived_usd - implied_usd) / max(implied_usd, 1e-9)
-            if drift > 0.12:
-                spent_usd = implied_usd
-                if live_sol_price > 0:
-                    spent_sol = implied_usd / live_sol_price
-
-        effective_spent_sol = spent_sol or ((spent_usd / live_sol_price) if spent_usd and live_sol_price else 0.0)
-        if effective_spent_sol <= 0 and implied_usd > 0 and live_sol_price > 0:
+        if spent_symbol == "SOL":
+            effective_spent_sol = spent_sol
+        elif spent_usd > 0 and live_sol_price > 0:
+            effective_spent_sol = spent_usd / live_sol_price
+        elif spent_symbol in ("USDC", "USDT") and spent_value > 0 and live_sol_price > 0:
+            effective_spent_sol = spent_value / live_sol_price
+        elif implied_usd > 0 and live_sol_price > 0:
             effective_spent_sol = implied_usd / live_sol_price
+        else:
+            effective_spent_sol = 0.0
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
         if effective_spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
