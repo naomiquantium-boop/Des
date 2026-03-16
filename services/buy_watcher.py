@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Dict, Optional
+from decimal import Decimal, InvalidOperation
 import aiosqlite
 
 from bot.config import settings
@@ -25,6 +26,24 @@ def _safe_float(v) -> float:
         return 0.0
 
 
+def _ui_token_amount(row: dict) -> float:
+    uta = (row or {}).get("uiTokenAmount") or {}
+    s = uta.get("uiAmountString")
+    if s not in (None, ""):
+        try:
+            return float(Decimal(str(s)))
+        except (InvalidOperation, ValueError, TypeError):
+            pass
+    amt = uta.get("amount")
+    dec = uta.get("decimals")
+    if amt not in (None, "") and dec is not None:
+        try:
+            return float(Decimal(str(amt)) / (Decimal(10) ** int(dec)))
+        except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
+            pass
+    return _safe_float(uta.get("uiAmount"))
+
+
 def _token_balance_maps(tx: dict, mint: str):
     meta = tx.get("meta") or {}
     pre = meta.get("preTokenBalances") or []
@@ -36,7 +55,7 @@ def _token_balance_maps(tx: dict, mint: str):
             if r.get("mint") != mint:
                 continue
             owner = r.get("owner") or r.get("accountIndex")
-            amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+            amt = _ui_token_amount(r)
             if owner is not None:
                 m[owner] = amt
         return m
@@ -57,11 +76,11 @@ def _all_token_deltas(tx: dict):
         post_amt = 0.0
         for r in pre:
             if r.get("mint") == mint and (r.get("owner") or r.get("accountIndex")) == owner:
-                pre_amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+                pre_amt = _ui_token_amount(r)
                 break
         for r in post:
             if r.get("mint") == mint and (r.get("owner") or r.get("accountIndex")) == owner:
-                post_amt = _safe_float(((r.get("uiTokenAmount") or {}).get("uiAmount")))
+                post_amt = _ui_token_amount(r)
                 break
         deltas[(mint, owner)] = post_amt - pre_amt
     return deltas
@@ -253,45 +272,13 @@ class BuyWatcher:
             await asyncio.sleep(settings.POLL_INTERVAL_SEC)
 
     async def _fetch_events(self, mint: str, last_sig: str | None):
-        events = []
         newest_sig = None
-        # Prefer Helius if configured and healthy, but always verify each buy against
-        # the parsed RPC transaction before posting. Helius can pick route-internal swap
-        # legs on aggregator trades, which makes the amount drift from Solscan.
-        if self.helius:
-            try:
-                txs = await self.helius.get_address_txs(mint, limit=25)
-                for tx in txs:
-                    sig = tx.get("signature")
-                    if not sig:
-                        continue
-                    if newest_sig is None:
-                        newest_sig = sig
-                    if sig == last_sig:
-                        break
-                    ev = _find_buy_in_tx(tx, mint)
-                    if not ev:
-                        continue
-                    try:
-                        parsed_tx = await self.rpc.get_transaction(sig)
-                    except Exception:
-                        parsed_tx = None
-                    if parsed_tx:
-                        rpc_ev = _find_buy_in_rpc_tx(parsed_tx, mint)
-                        if rpc_ev:
-                            # Keep RPC parsed amounts as source of truth when available.
-                            ev.update({k: v for k, v in rpc_ev.items() if v not in (None, "")})
-                    events.append(ev)
-                return list(reversed(events)), newest_sig
-            except Exception:
-                pass
-        # Fallback to plain RPC / Alchemy with a slightly deeper window so bursts do not
-        # skip buys between polls.
+        # RPC-only path. This bot must work with HELIUS unset.
         try:
             before = None
             collected = []
-            for _ in range(3):
-                sigs = await self.rpc.get_signatures_for_address(mint, limit=25, before=before)
+            for _ in range(4):
+                sigs = await self.rpc.get_signatures_for_address(mint, limit=30, before=before)
                 if not sigs:
                     break
                 for item in sigs:
