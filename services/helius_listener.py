@@ -50,6 +50,24 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
             return "SOL"
         return s or "TOKEN"
 
+    def _collect_principals() -> list[str]:
+        vals = []
+        for v in [fee_payer, tx.get("signer")]:
+            if v and v not in vals:
+                vals.append(v)
+        for item in account_keys:
+            acct = item.get("account") or item.get("pubkey")
+            if acct and acct not in vals:
+                vals.append(acct)
+        return vals
+
+    def _owner_of(item: dict) -> str | None:
+        for k in ("userAccount", "fromUserAccount", "toUserAccount", "tokenAccount", "fromTokenAccount", "toTokenAccount"):
+            v = item.get(k)
+            if v:
+                return v
+        return None
+
     def _net_native_spend(senders: list[str]) -> float:
         lamports = 0
         for nt in native_transfers:
@@ -64,26 +82,34 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 lamports -= amt
         return max(0.0, lamports / 1_000_000_000)
 
-    # Prefer Helius enhanced swap event first. It contains the exact swap leg amounts.
+    # Prefer Helius enhanced swap event first, but only trust the user-facing
+    # input/output legs. Aggregators include route-internal hops that can be larger
+    # than the real user input, which is what caused overcounting.
     try:
         token_inputs = swap.get("tokenInputs") or []
         token_outputs = swap.get("tokenOutputs") or []
         native_input = swap.get("nativeInput") or {}
+        principals = _collect_principals()
         if token_outputs:
-            out = None
+            output_candidates = []
             for item in token_outputs:
-                if item.get("mint") == mint and _fa(item.get("tokenAmount") or item.get("amount")) > 0:
-                    out = item
-                    break
-            if out is not None:
-                buyer = out.get("userAccount") or out.get("toUserAccount") or out.get("toTokenAccount") or fee_payer
-                amount = _fa(out.get("tokenAmount") or item.get("amount"))
-                spent_sol = 0.0
-                spent_usd = 0.0
-                spent_value = 0.0
-                spent_symbol = "SOL"
-
-                best_generic = None
+                if item.get("mint") != mint:
+                    continue
+                amount = _fa(item.get("tokenAmount") or item.get("amount"))
+                if amount <= 0:
+                    continue
+                owner = _owner_of(item)
+                score = 0
+                if owner in principals:
+                    score += 100
+                if owner == fee_payer:
+                    score += 20
+                output_candidates.append((score, amount, owner, item))
+            if output_candidates:
+                _, amount, owner, out = sorted(output_candidates, key=lambda x: (x[0], x[1]), reverse=True)[0]
+                buyer = owner or fee_payer
+                input_candidates = []
+                generic_candidates = []
                 for item in token_inputs:
                     imint = item.get("mint")
                     if imint == mint:
@@ -91,26 +117,45 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                     val = _fa(item.get("tokenAmount") or item.get("amount"))
                     if val <= 0:
                         continue
+                    owner = _owner_of(item)
                     sym = _norm_sym(item.get("tokenSymbol") or item.get("symbol"), imint)
                     usd = _fa(item.get("usdValue") or item.get("amountUsd") or item.get("valueUsd"))
-                    cand = {"mint": imint, "symbol": sym, "value": val, "usd": usd}
-                    if sym in STABLE_SYMBOLS:
-                        if val > spent_usd:
-                            spent_usd = val
-                            spent_value = val
-                            spent_symbol = sym
-                    elif sym == "SOL":
-                        if val > spent_sol:
-                            spent_sol = val
-                            spent_value = val
-                            spent_symbol = "SOL"
-                    elif best_generic is None or val > best_generic["value"]:
-                        best_generic = cand
+                    score = 0
+                    if owner in principals:
+                        score += 100
+                    if owner == buyer:
+                        score += 25
+                    if owner == fee_payer:
+                        score += 10
+                    cand = {"mint": imint, "symbol": sym, "value": val, "usd": usd, "owner": owner, "score": score}
+                    if sym == "SOL" or sym in STABLE_SYMBOLS:
+                        input_candidates.append(cand)
+                    else:
+                        generic_candidates.append(cand)
 
-                if spent_usd <= 0 and spent_sol <= 0 and best_generic is not None:
-                    spent_symbol = best_generic["symbol"]
-                    spent_value = best_generic["value"]
-                    spent_usd = best_generic["usd"]
+                spent_sol = 0.0
+                spent_usd = 0.0
+                spent_value = 0.0
+                spent_symbol = "SOL"
+
+                # Prefer principal-owned input legs. For SOL/WSOL and stablecoins,
+                # choose the highest-scoring user input, not the largest route hop.
+                ranked = sorted(input_candidates, key=lambda c: (c["score"], c["value"]), reverse=True)
+                chosen = ranked[0] if ranked and ranked[0]["score"] > 0 else None
+                if chosen is None and generic_candidates:
+                    generic_ranked = sorted(generic_candidates, key=lambda c: (c["score"], c["usd"], c["value"]), reverse=True)
+                    chosen = generic_ranked[0] if generic_ranked[0]["score"] > 0 else generic_ranked[0]
+                if chosen:
+                    spent_symbol = chosen["symbol"]
+                    spent_value = chosen["value"]
+                    spent_usd = chosen["usd"] if chosen["symbol"] in STABLE_SYMBOLS else chosen["usd"]
+                    if chosen["symbol"] == "SOL":
+                        spent_sol = chosen["value"]
+                        if spent_usd <= 0:
+                            spent_usd = chosen["usd"]
+                    elif chosen["symbol"] in STABLE_SYMBOLS:
+                        spent_usd = chosen["value"]
+                        spent_value = chosen["value"]
 
                 if spent_usd <= 0 and spent_sol <= 0 and spent_value <= 0:
                     net_native = _net_native_spend([buyer, fee_payer] if fee_payer else [buyer])
