@@ -140,28 +140,45 @@ def _find_buy_in_rpc_tx(tx: dict, mint: str) -> Optional[dict]:
     spent_usd = 0.0
     spent_value = 0.0
     spent_symbol = "SOL"
+    generic_spend = None
+
+    def _mint_symbol(m: str) -> str:
+        if m == WSOL_MINT:
+            return "SOL"
+        if m == USDC_MINT:
+            return "USDC"
+        if m == USDT_MINT:
+            return "USDT"
+        return (m or "TOKEN")[:6]
 
     for owner in principals:
-        wsol_delta = token_deltas.get((WSOL_MINT, owner), 0.0)
-        if wsol_delta < 0:
-            spent_sol = max(spent_sol, -wsol_delta)
-        for stable in STABLE_MINTS:
-            sd = token_deltas.get((stable, owner), 0.0)
-            if sd < 0:
-                spent_usd = max(spent_usd, -sd)
+        for (dmint, downer), delta in token_deltas.items():
+            if downer != owner or delta >= 0 or dmint == mint:
+                continue
+            amt = -delta
+            if dmint == WSOL_MINT:
+                spent_sol = max(spent_sol, amt)
+            elif dmint in STABLE_MINTS:
+                spent_usd = max(spent_usd, amt)
+            else:
+                if generic_spend is None or amt > generic_spend[0]:
+                    generic_spend = (amt, _mint_symbol(dmint))
 
-    if spent_sol <= 0 and spent_usd <= 0:
+    if spent_sol <= 0 and spent_usd <= 0 and generic_spend is None:
         spent_sol = _native_spend_sol(tx, principals, fee_payer, aks)
 
-    if spent_sol <= 0 and spent_usd <= 0:
+    if spent_sol <= 0 and spent_usd <= 0 and generic_spend is None:
         return None
 
     if spent_usd > 0:
         spent_value = spent_usd
         spent_symbol = "USDC"
-    else:
+    elif spent_sol > 0:
         spent_value = spent_sol
         spent_symbol = "SOL"
+    else:
+        spent_value = generic_spend[0]
+        spent_symbol = generic_spend[1]
 
     return {
         "buyer": buyer,
@@ -355,6 +372,8 @@ class BuyWatcher:
                     spent_sol = implied_usd / live_sol_price
 
         effective_spent_sol = spent_sol or ((spent_usd / live_sol_price) if spent_usd and live_sol_price else 0.0)
+        if effective_spent_sol <= 0 and implied_usd > 0 and live_sol_price > 0:
+            effective_spent_sol = implied_usd / live_sol_price
 
         # Global default min-buy filter. Token-level min_buy can raise it further below.
         if effective_spent_sol < float(settings.MIN_BUY_DEFAULT_SOL):
@@ -406,7 +425,7 @@ class BuyWatcher:
             spent_sol=effective_spent_sol,
             spent_usd=spent_usd,
             spent_symbol=spent_symbol,
-            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
+            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else (direct_spent_usd or spent_usd)),
             got_tokens=got_tokens,
             buyer=buyer,
             tx_url=tx_url,
@@ -424,7 +443,7 @@ class BuyWatcher:
             spent_sol=effective_spent_sol,
             spent_usd=spent_usd,
             spent_symbol=spent_symbol,
-            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
+            spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else (direct_spent_usd or spent_usd)),
             got_tokens=got_tokens,
             buyer=buyer,
             tx_url=tx_url,
@@ -458,7 +477,7 @@ class BuyWatcher:
                     spent_sol=effective_spent_sol,
                     spent_usd=spent_usd,
                     spent_symbol=spent_symbol,
-                    spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
+                    spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else (direct_spent_usd or spent_usd)),
                     got_tokens=got_tokens,
                     buyer=buyer,
                     tx_url=tx_url,
@@ -488,7 +507,7 @@ class BuyWatcher:
                 spent_sol=effective_spent_sol,
                 spent_usd=spent_usd,
                 spent_symbol=spent_symbol,
-                spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else direct_spent_usd),
+                spent_value=spent_value or (effective_spent_sol if spent_symbol == "SOL" else (direct_spent_usd or spent_usd)),
                 got_tokens=got_tokens,
                 buyer=buyer,
                 tx_url=tx_url,

@@ -30,9 +30,6 @@ class HeliusClient:
         await self.client.aclose()
 
 def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
-    # Heuristic with SOL/WSOL/stablecoin support:
-    # 1) Prefer Helius events.swap when present (best for Jupiter/aggregator routes)
-    # 2) Fallback to token/native transfers matching
     token_transfers = tx.get("tokenTransfers") or []
     native_transfers = tx.get("nativeTransfers") or []
     fee_payer = tx.get("feePayer") or tx.get("signer")
@@ -46,6 +43,12 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
             return float(v or 0)
         except Exception:
             return 0.0
+
+    def _norm_sym(sym: str | None, mint_addr: str | None = None) -> str:
+        s = (sym or "").upper()
+        if mint_addr == WSOL_MINT or s == "WSOL":
+            return "SOL"
+        return s or "TOKEN"
 
     def _net_native_spend(senders: list[str]) -> float:
         lamports = 0
@@ -61,7 +64,7 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 lamports -= amt
         return max(0.0, lamports / 1_000_000_000)
 
-    # Helius enhanced swap format
+    # Prefer Helius enhanced swap event first. It contains the exact swap leg amounts.
     try:
         token_inputs = swap.get("tokenInputs") or []
         token_outputs = swap.get("tokenOutputs") or []
@@ -74,48 +77,56 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                     break
             if out is not None:
                 buyer = out.get("userAccount") or out.get("toUserAccount") or out.get("toTokenAccount") or fee_payer
-                amount = _fa(out.get("tokenAmount") or out.get("amount"))
+                amount = _fa(out.get("tokenAmount") or item.get("amount"))
                 spent_sol = 0.0
                 spent_usd = 0.0
                 spent_value = 0.0
                 spent_symbol = "SOL"
 
-                # Prefer exact token inputs first (USDC/USDT/WSOL).
-                # For native SOL swaps, use net native transfers before trusting
-                # swap.nativeInput because some routes overfund and refund change.
+                best_generic = None
                 for item in token_inputs:
                     imint = item.get("mint")
                     if imint == mint:
                         continue
-                    sym = ((item.get("tokenSymbol") or item.get("symbol") or "").upper())
                     val = _fa(item.get("tokenAmount") or item.get("amount"))
                     if val <= 0:
                         continue
-                    if sym in STABLE_SYMBOLS and val > spent_usd:
-                        spent_usd = val
-                        spent_value = val
-                        spent_symbol = sym
-                    elif imint == WSOL_MINT or sym == "WSOL":
+                    sym = _norm_sym(item.get("tokenSymbol") or item.get("symbol"), imint)
+                    usd = _fa(item.get("usdValue") or item.get("amountUsd") or item.get("valueUsd"))
+                    cand = {"mint": imint, "symbol": sym, "value": val, "usd": usd}
+                    if sym in STABLE_SYMBOLS:
+                        if val > spent_usd:
+                            spent_usd = val
+                            spent_value = val
+                            spent_symbol = sym
+                    elif sym == "SOL":
                         if val > spent_sol:
                             spent_sol = val
                             spent_value = val
                             spent_symbol = "SOL"
+                    elif best_generic is None or val > best_generic["value"]:
+                        best_generic = cand
 
-                if spent_usd <= 0 and spent_sol <= 0:
+                if spent_usd <= 0 and spent_sol <= 0 and best_generic is not None:
+                    spent_symbol = best_generic["symbol"]
+                    spent_value = best_generic["value"]
+                    spent_usd = best_generic["usd"]
+
+                if spent_usd <= 0 and spent_sol <= 0 and spent_value <= 0:
                     net_native = _net_native_spend([buyer, fee_payer] if fee_payer else [buyer])
                     if net_native > 0:
                         spent_sol = net_native
                         spent_value = net_native
                         spent_symbol = "SOL"
 
-                if spent_usd <= 0 and spent_sol <= 0:
+                if spent_usd <= 0 and spent_sol <= 0 and spent_value <= 0:
                     lamports = _fa(native_input.get("amount"))
                     if lamports > 0:
                         spent_sol = lamports / 1_000_000_000 if lamports > 1_000_000 else lamports
                         spent_value = spent_sol
                         spent_symbol = "SOL"
 
-                if spent_sol > 0 or spent_usd > 0:
+                if spent_sol > 0 or spent_usd > 0 or spent_value > 0:
                     return {
                         "buyer": buyer,
                         "got_tokens": amount,
@@ -148,9 +159,11 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         spent_usd = 0.0
         spent_value = 0.0
         spent_symbol = "SOL"
-        spent_sol = _net_native_spend(senders)
-        if spent_sol > 0:
-            spent_value = spent_sol
+        best_generic = None
+        net_native = _net_native_spend(senders)
+        if net_native > 0:
+            spent_sol = net_native
+            spent_value = net_native
             spent_symbol = "SOL"
         for ot in token_transfers:
             if (ot.get("fromUserAccount") or ot.get("fromTokenAccount")) not in senders:
@@ -161,17 +174,24 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
             oval = float(ot.get("tokenAmount", 0) or 0)
             if oval <= 0:
                 continue
-            sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
+            sym = _norm_sym(ot.get("tokenSymbol") or ot.get("symbol"), omint)
+            usd = _fa(ot.get("usdValue") or ot.get("amountUsd") or ot.get("valueUsd"))
             if sym in STABLE_SYMBOLS:
                 if oval > spent_usd:
                     spent_usd = oval
                     spent_value = oval
                     spent_symbol = sym
-            elif omint == WSOL_MINT or sym == "WSOL":
+            elif sym == "SOL":
                 if oval > spent_sol:
                     spent_sol = oval
-                    spent_value = spent_sol
+                    spent_value = oval
                     spent_symbol = "SOL"
+            elif best_generic is None or oval > best_generic["value"]:
+                best_generic = {"value": oval, "symbol": sym, "usd": usd}
+        if spent_usd <= 0 and spent_sol <= 0 and best_generic is not None:
+            spent_value = best_generic["value"]
+            spent_symbol = best_generic["symbol"]
+            spent_usd = best_generic["usd"]
         return spent_sol, spent_usd, spent_value, spent_symbol
 
     for tt in token_transfers:
@@ -185,8 +205,9 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
         senders = candidate_senders(buyer)
         spent_sol, spent_usd, spent_value, spent_symbol = scan_spend(senders)
 
-        # Fallback: use the largest stable/WSOL outflow in the whole tx if sender matching failed.
-        if spent_sol <= 0 and spent_usd <= 0:
+        # Fallback: largest token outflow in whole tx.
+        if spent_sol <= 0 and spent_usd <= 0 and spent_value <= 0:
+            best_generic = None
             for ot in token_transfers:
                 omint = ot.get("mint")
                 if omint == mint:
@@ -194,17 +215,24 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 oval = float(ot.get("tokenAmount", 0) or 0)
                 if oval <= 0:
                     continue
-                sym = ((ot.get("tokenSymbol") or ot.get("symbol") or "").upper())
+                sym = _norm_sym(ot.get("tokenSymbol") or ot.get("symbol"), omint)
+                usd = _fa(ot.get("usdValue") or ot.get("amountUsd") or ot.get("valueUsd"))
                 if sym in STABLE_SYMBOLS and oval > spent_usd:
                     spent_usd = oval
                     spent_value = oval
                     spent_symbol = sym
-                elif (omint == WSOL_MINT or sym == "WSOL") and oval > spent_sol:
+                elif sym == "SOL" and oval > spent_sol:
                     spent_sol = oval
                     spent_value = oval
                     spent_symbol = "SOL"
+                elif best_generic is None or oval > best_generic["value"]:
+                    best_generic = {"value": oval, "symbol": sym, "usd": usd}
+            if spent_sol <= 0 and spent_usd <= 0 and spent_value <= 0 and best_generic is not None:
+                spent_value = best_generic["value"]
+                spent_symbol = best_generic["symbol"]
+                spent_usd = best_generic["usd"]
 
-        if spent_sol <= 0 and spent_usd <= 0:
+        if spent_sol <= 0 and spent_usd <= 0 and spent_value <= 0:
             return None
         return {
             "buyer": buyer,
