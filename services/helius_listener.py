@@ -84,7 +84,7 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
 
     # Prefer Helius enhanced swap event first, but only trust the user-facing
     # input/output legs. Aggregators include route-internal hops that can be larger
-    # than the real user input, which is what caused overcounting.
+    # than the real user input.
     try:
         token_inputs = swap.get("tokenInputs") or []
         token_outputs = swap.get("tokenOutputs") or []
@@ -138,8 +138,6 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 spent_value = 0.0
                 spent_symbol = "SOL"
 
-                # Prefer principal-owned input legs. For SOL/WSOL and stablecoins,
-                # choose the highest-scoring user input, not the largest route hop.
                 ranked = sorted(input_candidates, key=lambda c: (c["score"], c["value"]), reverse=True)
                 chosen = ranked[0] if ranked and ranked[0]["score"] > 0 else None
                 if chosen is None and generic_candidates:
@@ -148,11 +146,9 @@ def _find_buy_in_tx(tx: dict, mint: str) -> Optional[dict]:
                 if chosen:
                     spent_symbol = chosen["symbol"]
                     spent_value = chosen["value"]
-                    spent_usd = chosen["usd"] if chosen["symbol"] in STABLE_SYMBOLS else chosen["usd"]
+                    spent_usd = chosen["usd"]
                     if chosen["symbol"] == "SOL":
                         spent_sol = chosen["value"]
-                        if spent_usd <= 0:
-                            spent_usd = chosen["usd"]
                     elif chosen["symbol"] in STABLE_SYMBOLS:
                         spent_usd = chosen["value"]
                         spent_value = chosen["value"]

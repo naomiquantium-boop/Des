@@ -360,9 +360,18 @@ class BuyWatcher:
         else:
             spent_usd = 0.0
 
-        # Keep the on-chain spend amount exact. Do not rewrite SOL amount from token-side
-        # metadata because aggregator and routed swaps often make that estimate drift.
-        effective_spent_sol = spent_sol or ((spent_usd / live_sol_price) if (spent_symbol == "SOL" and spent_usd and live_sol_price) else 0.0)
+        # If the SOL-derived USD looks clearly wrong, prefer the token-side implied USD.
+        # This prevents cases where a stale SOL/USD cache or wrap/rent overhead makes
+        # the posted buy amount much larger than the actual swap shown on explorers.
+        if spent_symbol == "SOL" and spent_sol > 0 and live_sol_price > 0 and implied_usd > 0:
+            derived_usd = spent_sol * live_sol_price
+            drift = abs(derived_usd - implied_usd) / max(implied_usd, 1e-9)
+            if drift > 0.12:
+                spent_usd = implied_usd
+                if live_sol_price > 0:
+                    spent_sol = implied_usd / live_sol_price
+
+        effective_spent_sol = spent_sol or ((spent_usd / live_sol_price) if spent_usd and live_sol_price else 0.0)
         if effective_spent_sol <= 0 and implied_usd > 0 and live_sol_price > 0:
             effective_spent_sol = implied_usd / live_sol_price
 
