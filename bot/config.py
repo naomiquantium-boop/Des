@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 import os
+from typing import List
 
 
 def _get(name: str, default: str | None = None) -> str:
@@ -7,6 +8,58 @@ def _get(name: str, default: str | None = None) -> str:
     if v is None:
         raise RuntimeError(f"Missing env var: {name}")
     return v
+
+
+def _csv_env(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item and item.strip()]
+
+
+def _rpc_list() -> list[str]:
+    urls: list[str] = []
+    # New preferred multi-endpoint vars
+    for key in ("SOLANA_RPC_PRIMARY", "SOLANA_RPC_SECONDARY", "SOLANA_RPC_FALLBACK"):
+        value = os.getenv(key, "").strip()
+        if value and value not in urls:
+            urls.append(value)
+
+    # Optional comma-separated pool
+    for value in _csv_env("SOLANA_RPC_POOL"):
+        if value not in urls:
+            urls.append(value)
+
+    # Backward compatibility with existing single-endpoint envs
+    for key in ("SOLANA_RPC_URL", "SOLANA_RPC"):
+        value = os.getenv(key, "").strip()
+        if value and value not in urls:
+            urls.append(value)
+
+    if not urls:
+        urls.append("https://api.mainnet-beta.solana.com")
+    return urls
+
+
+def _ws_list() -> list[str]:
+    urls: list[str] = []
+    for key in ("SOLANA_WS_PRIMARY", "SOLANA_WS_SECONDARY", "SOLANA_WS_FALLBACK"):
+        value = os.getenv(key, "").strip()
+        if value and value not in urls:
+            urls.append(value)
+
+    for value in _csv_env("SOLANA_WS_POOL"):
+        if value not in urls:
+            urls.append(value)
+
+    for key in ("SOLANA_WS_URL", "SOLANA_WS"):
+        value = os.getenv(key, "").strip()
+        if value and value not in urls:
+            urls.append(value)
+
+    if not urls:
+        urls.append("wss://api.mainnet-beta.solana.com")
+    return urls
 
 
 class Settings(BaseModel):
@@ -20,8 +73,10 @@ class Settings(BaseModel):
 
     DATABASE_URL: str = _get("DATABASE_URL", "sqlite+aiosqlite:///data/buybot.db")
 
-    SOLANA_RPC: str = os.getenv("SOLANA_RPC_URL") or _get("SOLANA_RPC", "https://api.mainnet-beta.solana.com")
-    SOLANA_WS: str = os.getenv("SOLANA_WS_URL") or _get("SOLANA_WS", "wss://api.mainnet-beta.solana.com")
+    SOLANA_RPCS: List[str] = _rpc_list()
+    SOLANA_RPC: str = SOLANA_RPCS[0]
+    SOLANA_WSS: List[str] = _ws_list()
+    SOLANA_WS: str = SOLANA_WSS[0]
     HELIUS_API_KEY: str = os.getenv("HELIUS_API_KEY", "")
 
     PAYMENT_WALLET: str = _get("PAYMENT_WALLET")

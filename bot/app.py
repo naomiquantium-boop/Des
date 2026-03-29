@@ -53,7 +53,7 @@ async def run():
     bot = Bot(token=settings.BOT_TOKEN, parse_mode=ParseMode.HTML)
     dp = Dispatcher(storage=MemoryStorage())
 
-    rpc = SolanaRPC(settings.SOLANA_RPC)
+    rpc = SolanaRPC(settings.SOLANA_RPCS)
 
     # Attach shared objects to dispatcher workflow_data for Aiogram v3 DI.
     # Handlers can receive these as function parameters: (db: DB, rpc: SolanaRPC)
